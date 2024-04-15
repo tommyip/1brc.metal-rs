@@ -1,6 +1,7 @@
 use core::fmt;
 use std::{
     collections::HashMap,
+    env,
     fs::File,
     io::{BufRead, BufReader},
 };
@@ -50,7 +51,8 @@ impl fmt::Display for Output {
 }
 
 fn main() {
-    let f = File::open("measurements.txt").unwrap();
+    let measurements_path = env::args().skip(1).next().expect("Missing path");
+    let f = File::open(measurements_path).unwrap();
     let reader = BufReader::new(f);
 
     let mut agg = HashMap::<String, Station>::new();
