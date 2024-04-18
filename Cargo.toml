@@ -7,3 +7,4 @@ edition = "2021"
 
 [dependencies]
 memmap2 = "0.9.4"
+metal = "0.27.0"
