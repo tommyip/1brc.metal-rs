@@ -14,8 +14,18 @@ kernel void blackbox(
     const uint64_t cur_thread_chunk_len = gid < grid_size - 1 ?
         thread_chunk_len : chunk_len % thread_chunk_len;
 
-    uint64_t sum = 0;
-    for (uint64_t i = 0; i < cur_thread_chunk_len; ++i) {
+    ulong4 simd_sum = ulong4(0);
+    const uint64_t simd_len = cur_thread_chunk_len - cur_thread_chunk_len % 16;
+    uint64_t i;
+    for (i = 0; i < simd_len; i += 16) {
+        uint64_t offset = start_idx + i;
+        simd_sum += ulong4(chunk[offset], chunk[offset+1], chunk[offset+2], chunk[offset+3]);
+        simd_sum += ulong4(chunk[offset+4], chunk[offset+5], chunk[offset+6], chunk[offset+7]);
+        simd_sum += ulong4(chunk[offset+8], chunk[offset+9], chunk[offset+10], chunk[offset+11]);
+        simd_sum += ulong4(chunk[offset+12], chunk[offset+13], chunk[offset+14], chunk[offset+15]);
+    }
+    uint64_t sum = simd_sum.w + simd_sum.x + simd_sum.y + simd_sum.z;
+    for (; i < cur_thread_chunk_len; ++i) {
         sum += chunk[start_idx + i];
     }
     res[gid] = sum;
