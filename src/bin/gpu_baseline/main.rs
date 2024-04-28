@@ -1,109 +1,153 @@
+//! # GPU baseline
+//!
+//! Process entire file on the GPU. Each Metal kernel handles a small chunk of
+//! the measurements file, parsing it line by line and updating a global hashmap.
+
+use core::fmt;
 use std::{
+    collections::HashMap,
     env, ffi,
     fs::File,
-    mem::size_of,
+    iter,
+    mem::{self, size_of},
     ops::Range,
-    os::unix::fs::FileExt,
     path::PathBuf,
-    sync::atomic::{AtomicU64, Ordering},
-    thread,
+    u32,
 };
 
-use metal::{objc::rc::autoreleasepool, Device, MTLResourceOptions, MTLSize, NSUInteger};
+use memmap2::Mmap;
+use metal::{self, objc::rc::autoreleasepool, Device, MTLResourceOptions, MTLSize};
 
-const MAX_LINE_LEN: u64 = 107;
-/// (C)PU chunk length (how much to load into memory at once)
-const CCHUNK_LEN: u64 = 16 * 1024 * 1024;
-/// CPU chunk length taking into account excess space needed to reach the next newline
-const CCHUNK_WITH_EXCESS_LEN: u64 = CCHUNK_LEN + MAX_LINE_LEN - 1;
-/// (M)etal/GPU chunk length (how much bytes to process by a kernel)
-const MCHUNK_LEN: u64 = 1024;
-const MCHUNKS_PER_CCHUNK: u64 = {
-    assert!(CCHUNK_LEN % MCHUNK_LEN == 0);
-    CCHUNK_LEN / MCHUNK_LEN
-};
+use one_billion_row::round_to_positive;
 
-fn is_newline(c: &u8) -> bool {
-    *c == b'\n'
+const CHUNK_LEN: u64 = 2 * 1024;
+const MAX_NAMES: u64 = 10_000;
+/// Target 50% load factor
+const HASHMAP_LEN: u64 = MAX_NAMES * 2;
+const HASHMAP_FIELDS: usize = 5;
+const U64_SIZE: u64 = size_of::<u64>() as u64;
+const I32_SIZE: u64 = size_of::<i32>() as u64;
+const U32_SIZE: u64 = size_of::<u32>() as u64;
+
+struct Station {
+    min: i32,
+    max: i32,
+    sum: i32,
+    count: i32,
 }
 
-/// Read `chunk_idx`-th CPU chunk and aligned start and end to the next newline.
-/// Return the range within `buf` containing the aligned chunk.
-fn get_aligned_cchunk<'a, const CCHUNK_LEN: u64>(
-    file: &File,
-    cchunk_idx: u64,
-    n_cchunks: u64,
-    buf: &'a mut [u8],
-) -> Range<usize> {
-    let offset = CCHUNK_LEN * cchunk_idx;
-    let len = file.read_at(buf, offset).unwrap();
-    let start = if cchunk_idx == 0 {
-        0
-    } else {
-        buf.iter().position(is_newline).unwrap() + 1
-    };
-    let end = if cchunk_idx == n_cchunks - 1 {
-        len
-    } else {
-        buf[CCHUNK_LEN as usize..]
-            .iter()
-            .position(is_newline)
-            .unwrap()
-            + CCHUNK_LEN as usize
-            + 1
-    };
-    start..end
+#[derive(Default)]
+struct Stations<'a> {
+    inner: HashMap<&'a str, Station>,
 }
 
-/// After aligning a CPU chunk to newline delimiters its length might not be
-/// divisible by the GPU chunk length. Split off the chunk's tail starting after
-/// the last complete GPU chunk's ending newline.
-fn split_cchunk_excess<'a, const MCHUNK_LEN: u64>(chunk: &'a [u8]) -> (&'a [u8], &'a [u8]) {
-    let excess = chunk.len() % MCHUNK_LEN as usize;
-    if excess == 0 {
-        return (chunk, &[]);
-    }
-    let last_mchunk_offset = chunk.len() - excess;
-    if let Some(excess_start) = chunk[last_mchunk_offset..]
-        .iter()
-        .position(is_newline)
-        .map(|i| last_mchunk_offset + i + 1)
-    {
-        chunk.split_at(excess_start)
-    } else {
-        // `last_mchunk_offset` is in the middle of the last line, the second last
-        // mchunk will consume the whole of the last line.
-        (chunk, &[])
+impl fmt::Display for Station {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let min = self.min as f32 / 10.;
+        let max = self.max as f32 / 10.;
+        let mean = round_to_positive(((self.sum as f32 / 10.) / self.count as f32) * 10.) / 10.;
+        f.write_fmt(format_args!("{:.1}/{:.1}/{:.1}", min, mean, max))
     }
 }
 
-fn histogram(buf: &[u8]) -> u64 {
-    buf.len() as u64
+impl<'a> fmt::Display for Stations<'a> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("{")?;
+        let mut names = self.inner.keys().collect::<Vec<_>>();
+        names.sort_unstable();
+        for (i, name) in names.into_iter().enumerate() {
+            if i > 0 {
+                f.write_str(", ")?;
+            }
+            let station = &self.inner[name];
+            f.write_fmt(format_args!("{}={}", name, station))?;
+        }
+        f.write_str("}")
+    }
+}
+
+fn device_buffer<T>(device: &metal::Device, buf: &[T]) -> metal::Buffer {
+    device.new_buffer_with_bytes_no_copy(
+        buf.as_ptr() as *const ffi::c_void,
+        (buf.len() * size_of::<T>()) as u64,
+        MTLResourceOptions::StorageModeShared,
+        None,
+    )
+}
+
+fn reconstruct_gpu_hashmap<'a>(
+    buf: &'a [u8],
+    stations: &mut HashMap<&'a str, Station>,
+    buckets: &[i32],
+) {
+    for bucket in buckets.chunks_exact(HASHMAP_FIELDS) {
+        let name_idx = unsafe { mem::transmute::<i32, u32>(bucket[0]) } as usize;
+        if name_idx != 1 {
+            let name_len = buf[name_idx..].iter().position(|c| *c == b';').unwrap();
+            let name =
+                unsafe { std::str::from_utf8_unchecked(&buf[name_idx..name_idx + name_len]) };
+            stations.insert(
+                name,
+                Station {
+                    min: bucket[1],
+                    max: bucket[2],
+                    sum: bucket[3],
+                    count: bucket[4],
+                },
+            );
+        }
+    }
+}
+
+/// Our GPU concurrent hashmap uses Metal's
+/// `atomic_compare_exchange_weak_explicit` instruction key (index of a station
+/// name) lookup/insert, but it only supports up to 32 bits integer and not 64
+/// bits integer which is necessary for fully indexing the measurements buffer
+/// (~13GB). To work around this issue we split the file into chunks aligned to
+/// line boundaries.
+fn split_aligned_measurements<const MAX_SIZE: usize>(buf: &[u8]) -> Vec<Range<usize>> {
+    let mut ranges = Vec::with_capacity(buf.len().div_ceil(MAX_SIZE));
+    let mut start = 0;
+    loop {
+        let end = start + MAX_SIZE;
+        if end < buf.len() {
+            let end = buf[..end].iter().rposition(|&c| c == b'\n').unwrap() + 1;
+            ranges.push(start..end);
+            start = end;
+        } else {
+            ranges.push(start..buf.len());
+            break;
+        };
+    }
+    ranges
 }
 
 fn main() {
     let measurements_path = env::args().skip(1).next().expect("Missing path");
     let file = &File::open(measurements_path).unwrap();
-    let file_len = file.metadata().unwrap().len();
-    let n_cchunks = file_len.div_ceil(CCHUNK_LEN);
-    // This is over-allocated, slots at the end of each CPU chunk
-    // might not be used.
-    let n_mthreads = n_cchunks * MCHUNKS_PER_CCHUNK;
-    let res = vec![0u64; n_mthreads as usize];
-    let u64_size = size_of::<u64>() as NSUInteger;
+    let buf = unsafe { &Mmap::map(file).unwrap() };
+    let buf_len = buf.len() as u64;
+    let split_ranges = split_aligned_measurements::<{ u32::MAX as usize }>(&buf);
 
-    println!("CCHUNK_LEN {}, MCHUNK_LEN {}", CCHUNK_LEN, MCHUNK_LEN);
-    println!(
-        "file_len {}, n_cchunks {}, n_mthreads {}",
-        file_len, n_cchunks, n_mthreads
-    );
+    // A connected list of hashmaps mapping station name (as offset)
+    // to min, max, sum and count of temperatures. The name offset is represented
+    // as (rust) i32 and (metal) atomic_int but actually contains a u32.
+    let buckets = iter::repeat([1, i32::MAX, i32::MIN, 0, 0])
+        .take(HASHMAP_LEN as usize * split_ranges.len())
+        .flatten()
+        .collect::<Vec<_>>();
 
-    let cpu_total = &AtomicU64::new(0);
-    let gpu_total = &AtomicU64::new(0);
+    let mut stations = Stations::default();
 
     autoreleasepool(|| {
-        let device = &Device::system_default().unwrap();
+        let device = &Device::system_default().expect("No Metal device found");
+        assert!(
+            buf_len < device.max_buffer_length(),
+            "Measurements file does not fit in a single metal buffer"
+        );
         let cmd_q = &device.new_command_queue();
+        let cmd_buf = cmd_q.new_command_buffer();
+
         let library_path =
             PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/bin/gpu_baseline/kernel.metallib");
         let library = device.new_library_with_file(library_path).unwrap();
@@ -111,88 +155,43 @@ fn main() {
         let pipeline_state = &device
             .new_compute_pipeline_state_with_function(&kernel)
             .unwrap();
-        let threads_per_threadgroup =
-            MTLSize::new(pipeline_state.max_total_threads_per_threadgroup(), 1, 1);
 
-        let mres = &device.new_buffer_with_bytes_no_copy(
-            res.as_ptr() as *const ffi::c_void,
-            res.len() as u64 * u64_size,
-            MTLResourceOptions::StorageModeShared,
-            None,
-        );
+        let device_buf = device_buffer(&device, &buf);
+        let device_buckets = device_buffer(&device, &buckets);
+        let chunk_len_ptr = (&(CHUNK_LEN as u32) as *const u32) as *const ffi::c_void;
 
-        let next_cchunk_idx = &AtomicU64::new(0);
+        for (i, split_range) in split_ranges.iter().enumerate() {
+            let split_len = split_range.len() as u64;
+            let split_len_ptr = (&(split_len as u32) as *const u32) as *const ffi::c_void;
+            let n_threads = split_len / CHUNK_LEN - (split_len % CHUNK_LEN == 0) as u64;
+            let threads_per_grid = MTLSize::new(n_threads, 1, 1);
+            let threads_per_threadgroup =
+                MTLSize::new(pipeline_state.max_total_threads_per_threadgroup(), 1, 1);
+            let split_range_offset = split_range.start as u64 * U64_SIZE;
+            let buckets_offset = HASHMAP_LEN * i as u64 * HASHMAP_FIELDS as u64 * I32_SIZE;
 
-        thread::scope(|s| {
-            for _ in 0..thread::available_parallelism().unwrap().get() {
-                s.spawn(move || {
-                    let mut buf = vec![0u8; CCHUNK_WITH_EXCESS_LEN as usize];
-                    let mchunk = device.new_buffer_with_bytes_no_copy(
-                        buf.as_ptr() as *const ffi::c_void,
-                        buf.len() as u64,
-                        MTLResourceOptions::StorageModeShared,
-                        None,
-                    );
-                    let mchunk_len_ptr = (&MCHUNK_LEN as *const u64) as *const ffi::c_void;
+            let encoder = cmd_buf.new_compute_command_encoder();
+            encoder.set_compute_pipeline_state(&pipeline_state);
+            encoder.set_buffer(0, Some(&device_buf), split_range_offset);
+            encoder.set_buffer(1, Some(&device_buckets), buckets_offset);
+            encoder.set_bytes(2, U32_SIZE, split_len_ptr);
+            encoder.set_bytes(3, U32_SIZE, chunk_len_ptr);
 
-                    // Process next CPU chunk
-                    loop {
-                        let cchunk_idx = next_cchunk_idx.fetch_add(1, Ordering::Relaxed);
-                        if cchunk_idx >= n_cchunks {
-                            break;
-                        }
+            encoder.dispatch_threads(threads_per_grid, threads_per_threadgroup);
+            encoder.end_encoding();
+        }
 
-                        let cchunk_range =
-                            get_aligned_cchunk::<CCHUNK_LEN>(file, cchunk_idx, n_cchunks, &mut buf);
-                        cpu_total.fetch_add(cchunk_range.len() as u64, Ordering::Relaxed);
-                        let cchunk_start = cchunk_range.start as u64;
-                        let (cchunk, excess) =
-                            split_cchunk_excess::<MCHUNK_LEN>(&buf[cchunk_range.clone()]);
-                        let cchunk_len = cchunk.len() as u64;
-
-                        if !excess.is_empty() {
-                            let excess_res = histogram(excess);
-                            gpu_total.fetch_add(excess_res, Ordering::Relaxed);
-                        }
-
-                        if cchunk_len == 0 {
-                            continue;
-                        }
-
-                        let n_threads = cchunk_len / MCHUNK_LEN;
-                        let threads_per_grid = MTLSize::new(n_threads, 1, 1);
-                        let cchunk_len_ptr = (&cchunk_len as *const u64) as *const ffi::c_void;
-                        let res_offset = MCHUNKS_PER_CCHUNK * cchunk_idx;
-
-                        let cmd_buf = cmd_q.new_command_buffer();
-                        let enc = cmd_buf.new_compute_command_encoder();
-                        enc.set_compute_pipeline_state(&pipeline_state);
-                        enc.set_buffer(0, Some(&mchunk), cchunk_start);
-                        enc.set_buffer(1, Some(&mres), res_offset * u64_size);
-                        enc.set_bytes(2, u64_size, cchunk_len_ptr);
-                        enc.set_bytes(3, u64_size, mchunk_len_ptr);
-
-                        enc.dispatch_threads(threads_per_grid, threads_per_threadgroup);
-                        enc.end_encoding();
-                        cmd_buf.commit();
-
-                        cmd_buf.wait_until_completed();
-                    }
-                });
-            }
-        })
+        cmd_buf.commit();
+        cmd_buf.wait_until_completed();
     });
 
-    gpu_total.fetch_add(res.iter().sum::<u64>(), Ordering::Relaxed);
+    for (i, split_range) in split_ranges.into_iter().enumerate() {
+        let split_buf = &buf[split_range];
+        let bucket_start = HASHMAP_LEN as usize * HASHMAP_FIELDS * i;
+        let bucket_end = bucket_start + HASHMAP_LEN as usize * HASHMAP_FIELDS;
+        let split_buckets = &buckets[bucket_start..bucket_end];
+        reconstruct_gpu_hashmap(split_buf, &mut stations.inner, split_buckets);
+    }
 
-    println!("{:?}", &res[..20]);
-
-    let cpu_total = cpu_total.load(Ordering::Relaxed);
-    let gpu_total = gpu_total.load(Ordering::Relaxed);
-    println!(
-        "CPU total: {}, GPU total: {}, match: {}",
-        cpu_total,
-        gpu_total,
-        cpu_total == gpu_total
-    );
+    println!("{}", stations);
 }
