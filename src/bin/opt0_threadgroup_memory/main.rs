@@ -1,9 +1,12 @@
-//! # GPU baseline
+//! # Optimization 0: Local histogram accumulation with threadgroup memory
 //!
 //! Process entire file on the GPU. Each Metal kernel handles a small chunk of
-//! the measurements file, parsing it line by line and updating a global hashmap.
-//! The kernel is implemented naïvely like one would writing CPU code with
-//! no (GPU or otherwise) micro-optimization.
+//! the measurements file, parsing it line by line and updating its parent
+//! threadgroup local hashmap. After a threadgroup finishes processing its
+//! mega-chunk the local hashmap is merged with the global hashmap. This
+//! reduces expensive global memory access.
+//!
+//! Still no micro-optimization is applied.
 
 use core::fmt;
 use std::{
@@ -150,8 +153,8 @@ fn main() {
         let cmd_q = &device.new_command_queue();
         let cmd_buf = cmd_q.new_command_buffer();
 
-        let library_path =
-            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/bin/gpu_baseline/kernel.metallib");
+        let library_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("src/bin/opt0_threadgroup_memory/kernel.metallib");
         let library = device.new_library_with_file(library_path).unwrap();
         let kernel = library.get_function("histogram", None).unwrap();
         let pipeline_state = &device
