@@ -8,6 +8,10 @@ pub const U64_SIZE: u64 = size_of::<u64>() as u64;
 pub const I32_SIZE: u64 = size_of::<i32>() as u64;
 pub const U32_SIZE: u64 = size_of::<u32>() as u64;
 
+pub fn c_void<T>(value_ref: &T) -> *const ffi::c_void {
+    (value_ref as *const T) as *const ffi::c_void
+}
+
 /// https://stackoverflow.com/a/28124775
 fn round_to_positive(x: f32) -> f32 {
     let y = x.floor();

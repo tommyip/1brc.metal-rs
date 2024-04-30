@@ -1,6 +1,5 @@
 use std::{
     collections::HashMap,
-    ffi,
     fs::File,
     iter,
     mem::{self},
@@ -10,7 +9,9 @@ use std::{
 use memmap2::Mmap;
 use metal::{objc::rc::autoreleasepool, Device, MTLSize};
 
-use crate::{device_buffer, metal_frame_capture, Station, Stations, I32_SIZE, U32_SIZE, U64_SIZE};
+use crate::{
+    c_void, device_buffer, metal_frame_capture, Station, Stations, I32_SIZE, U32_SIZE, U64_SIZE,
+};
 
 const CHUNK_LEN: u64 = 2 * 1024;
 const MAX_NAMES: u64 = 10_000;
@@ -107,11 +108,9 @@ where
 
         let device_buf = device_buffer(device, &buf);
         let device_buckets = device_buffer(device, &buckets);
-        let chunk_len_ptr = (&(CHUNK_LEN as u32) as *const u32) as *const ffi::c_void;
 
         for (i, split_range) in split_ranges.iter().enumerate() {
             let split_len = split_range.len() as u64;
-            let split_len_ptr = (&(split_len as u32) as *const u32) as *const ffi::c_void;
             let n_threads = split_len / CHUNK_LEN - (split_len % CHUNK_LEN == 0) as u64;
             let threads_per_grid = MTLSize::new(n_threads, 1, 1);
             let threads_per_threadgroup =
@@ -123,8 +122,8 @@ where
             encoder.set_compute_pipeline_state(&pipeline_state);
             encoder.set_buffer(0, Some(&device_buf), split_range_offset);
             encoder.set_buffer(1, Some(&device_buckets), buckets_offset);
-            encoder.set_bytes(2, U32_SIZE, split_len_ptr);
-            encoder.set_bytes(3, U32_SIZE, chunk_len_ptr);
+            encoder.set_bytes(2, U32_SIZE, c_void(&(split_len as u32)));
+            encoder.set_bytes(3, U32_SIZE, c_void(&(CHUNK_LEN as u32)));
 
             encoder.dispatch_threads(threads_per_grid, threads_per_threadgroup);
             encoder.end_encoding();

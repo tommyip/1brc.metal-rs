@@ -3,6 +3,8 @@ use std::{env, ffi, fs::File, mem::size_of, path::PathBuf, thread};
 use memmap2::Mmap;
 use metal::{self, objc::rc::autoreleasepool, Device, MTLResourceOptions, MTLSize};
 
+use one_billion_row::c_void;
+
 const CPU_GPU_RATIO: f32 = 0.5;
 const GPU_CHUNK_SIZE: u64 = 2 * 1024;
 const U64_SIZE: u64 = size_of::<u64>() as u64;
@@ -49,10 +51,8 @@ fn gpu_impl(chunk: &[u8]) -> u64 {
                 MTLResourceOptions::StorageModeShared,
                 None,
             );
-            let thread_chunk_len_ptr = (&GPU_CHUNK_SIZE as *const u64) as *const ffi::c_void;
 
             let chunk_len = chunk.len() as u64;
-            let chunk_len_ptr = (&chunk_len as *const u64) as *const ffi::c_void;
             let n_threads = chunk_len.div_ceil(GPU_CHUNK_SIZE);
             let threads_per_grid = MTLSize::new(n_threads, 1, 1);
 
@@ -61,8 +61,8 @@ fn gpu_impl(chunk: &[u8]) -> u64 {
             encoder.set_compute_pipeline_state(&pipeline_state);
             encoder.set_buffer(0, Some(&mtl_chunk), 0);
             encoder.set_buffer(1, Some(&mtl_res), complete_chunk_len * U64_SIZE * i as u64);
-            encoder.set_bytes(2, U64_SIZE, chunk_len_ptr);
-            encoder.set_bytes(3, U64_SIZE, thread_chunk_len_ptr);
+            encoder.set_bytes(2, U64_SIZE, c_void(&chunk_len));
+            encoder.set_bytes(3, U64_SIZE, c_void(&GPU_CHUNK_SIZE));
 
             encoder.dispatch_threads(threads_per_grid, threads_per_threadgroup);
             encoder.end_encoding();

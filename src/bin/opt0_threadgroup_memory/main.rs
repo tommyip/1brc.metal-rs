@@ -8,10 +8,14 @@
 //!
 //! Still no micro-optimization is applied.
 
-use std::{env, ffi, fs::File, path::PathBuf};
+use std::{env, fs::File, path::PathBuf};
 
 use metal::{FunctionConstantValues, MTLDataType};
-use one_billion_row::gpu_baseline::{baseline, HASHMAP_LEN};
+
+use one_billion_row::{
+    c_void,
+    gpu_baseline::{baseline, HASHMAP_LEN},
+};
 
 fn main() {
     let measurements_path = env::args().skip(1).next().expect("Missing path");
@@ -25,12 +29,12 @@ fn main() {
         .join("src/bin/opt0_threadgroup_memory/kernel.metallib");
     let kernel_constants = FunctionConstantValues::new();
     kernel_constants.set_constant_value_with_name(
-        (&(HASHMAP_LEN as u32) as *const u32) as *const ffi::c_void,
+        c_void(&(HASHMAP_LEN as u32)),
         MTLDataType::UInt,
         "G_HASHMAP_LEN",
     );
     kernel_constants.set_constant_value_with_name(
-        (&reinterpret_atomics as *const bool) as *const ffi::c_void,
+        c_void(&reinterpret_atomics),
         MTLDataType::Bool,
         "REINTERPRET_ATOMICS",
     );
