@@ -11,7 +11,7 @@ use std::{
 use memmap2::Mmap;
 use metal::{objc::rc::autoreleasepool, Device, MTLSize};
 
-use crate::{device_buffer, Station, Stations, I32_SIZE, U32_SIZE, U64_SIZE};
+use crate::{device_buffer, metal_frame_capture, Station, Stations, I32_SIZE, U32_SIZE, U64_SIZE};
 
 const CHUNK_LEN: u64 = 2 * 1024;
 const MAX_NAMES: u64 = 10_000;
@@ -87,6 +87,12 @@ pub fn baseline<'a>(file: &'a File, metallib: &Path) {
             buf_len < device.max_buffer_length(),
             "Measurements file does not fit in a single metal buffer"
         );
+
+        let _guard = metal_frame_capture(
+            device,
+            "/Users/thomas/repos/1brc.metal-rs/framecapture.gputrace",
+        );
+
         let cmd_q = &device.new_command_queue();
         let cmd_buf = cmd_q.new_command_buffer();
 
@@ -96,8 +102,8 @@ pub fn baseline<'a>(file: &'a File, metallib: &Path) {
             .new_compute_pipeline_state_with_function(&kernel)
             .unwrap();
 
-        let device_buf = device_buffer(&device, &buf);
-        let device_buckets = device_buffer(&device, &buckets);
+        let device_buf = device_buffer(device, &buf);
+        let device_buckets = device_buffer(device, &buckets);
         let chunk_len_ptr = (&(CHUNK_LEN as u32) as *const u32) as *const ffi::c_void;
 
         for (i, split_range) in split_ranges.iter().enumerate() {

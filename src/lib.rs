@@ -1,6 +1,6 @@
 pub mod gpu_baseline;
 
-use std::{collections::HashMap, ffi, fmt, mem::size_of};
+use std::{collections::HashMap, env, ffi, fmt, mem::size_of};
 
 use metal::MTLResourceOptions;
 
@@ -63,4 +63,30 @@ pub fn device_buffer<T>(device: &metal::Device, buf: &[T]) -> metal::Buffer {
         MTLResourceOptions::StorageModeShared,
         None,
     )
+}
+
+pub struct MetalCaptureGuard;
+
+impl Drop for MetalCaptureGuard {
+    fn drop(&mut self) {
+        metal::CaptureManager::shared().stop_capture();
+    }
+}
+
+pub fn metal_frame_capture(device: &metal::Device, output_url: &str) -> Option<MetalCaptureGuard> {
+    if !env::var("METAL_CAPTURE_ENABLED")
+        .ok()
+        .is_some_and(|x| &x == "1")
+    {
+        return None;
+    }
+    let capture_manager = metal::CaptureManager::shared();
+    let capture_descriptor = metal::CaptureDescriptor::new();
+    capture_descriptor.set_capture_device(&device);
+    capture_descriptor.set_output_url(output_url);
+    capture_descriptor.set_destination(metal::MTLCaptureDestination::GpuTraceDocument);
+
+    capture_manager.start_capture(&capture_descriptor).unwrap();
+
+    Some(MetalCaptureGuard)
 }
