@@ -5,7 +5,6 @@ use std::{
     iter,
     mem::{self},
     ops::Range,
-    path::Path,
 };
 
 use memmap2::Mmap;
@@ -16,7 +15,7 @@ use crate::{device_buffer, metal_frame_capture, Station, Stations, I32_SIZE, U32
 const CHUNK_LEN: u64 = 2 * 1024;
 const MAX_NAMES: u64 = 10_000;
 /// Target 50% load factor
-const HASHMAP_LEN: u64 = MAX_NAMES * 2;
+pub const HASHMAP_LEN: u64 = MAX_NAMES * 2;
 const HASHMAP_FIELDS: usize = 5;
 
 fn reconstruct_gpu_hashmap<'a>(
@@ -66,7 +65,10 @@ fn split_aligned_measurements<const MAX_SIZE: usize>(buf: &[u8]) -> Vec<Range<us
     ranges
 }
 
-pub fn baseline<'a>(file: &'a File, metallib: &Path) {
+pub fn baseline<'a, F>(file: &'a File, kernel_getter: F)
+where
+    F: FnOnce(&metal::Device) -> metal::Function,
+{
     let buf = unsafe { &Mmap::map(file).unwrap() };
     let buf_len = buf.len() as u64;
     let split_ranges = split_aligned_measurements::<{ u32::MAX as usize }>(&buf);
@@ -96,8 +98,9 @@ pub fn baseline<'a>(file: &'a File, metallib: &Path) {
         let cmd_q = &device.new_command_queue();
         let cmd_buf = cmd_q.new_command_buffer();
 
-        let library = device.new_library_with_file(metallib).unwrap();
-        let kernel = library.get_function("histogram", None).unwrap();
+        // let library = device.new_library_with_file(metallib).unwrap();
+        // let kernel = library.get_function("histogram", shader_constants).unwrap();
+        let kernel = kernel_getter(&device);
         let pipeline_state = &device
             .new_compute_pipeline_state_with_function(&kernel)
             .unwrap();

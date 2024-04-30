@@ -1,4 +1,3 @@
-#define HASHMAP_LEN 20000
 #define MIN_FIELD 1
 #define MAX_FIELD 2
 #define SUM_FIELD 3
@@ -7,6 +6,8 @@
 #include <metal_stdlib>
 
 using namespace metal;
+
+constant uint HASHMAP_LEN [[ function_constant(0) ]];
 
 // Compare string until `;`
 bool name_eq(

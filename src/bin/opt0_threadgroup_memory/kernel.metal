@@ -1,6 +1,5 @@
 // Max threadgroup memory (32KB) / Bytes per entry (6 * 4B) = 1365.33
 #define L_HASHMAP_LEN 1365
-#define G_HASHMAP_LEN 20000
 #define L_BUCKET_LEN 6
 #define G_BUCKET_LEN 5
 #define MIN_FIELD 1
@@ -15,6 +14,11 @@
 #define EMPTY_BUCKET_KEY 1
 
 #include <metal_stdlib>
+
+constant uint G_HASHMAP_LEN [[ function_constant(0) ]];
+// Whether to reinterpret atomics as non-atomics when race condition
+// is guaranteed not to occur.
+constant bool REINTERPRET_ATOMICS [[ function_constant(1) ]];
 
 using namespace metal;
 
@@ -39,16 +43,26 @@ bool name_eq(
 }
 
 void init_local_hashmap(threadgroup atomic_int* buckets, uint lid, uint threadgroup_size) {
-    // TODO: Reinterpret buckets as int* to avoid atomics
-
     for (uint i = lid; i < L_HASHMAP_LEN; i += threadgroup_size) {
         uint offset = i * L_BUCKET_LEN;
-        atomic_store_explicit(&buckets[offset], EMPTY_BUCKET_KEY, memory_order_relaxed);
-        atomic_store_explicit(&buckets[offset + MIN_FIELD], INT_MAX, memory_order_relaxed);
-        atomic_store_explicit(&buckets[offset + MAX_FIELD], INT_MIN, memory_order_relaxed);
-        atomic_store_explicit(&buckets[offset + SUM_FIELD], 0, memory_order_relaxed);
-        atomic_store_explicit(&buckets[offset + COUNT_FIELD], 0, memory_order_relaxed);
-        // Global bucket field is overwrite only so no need to initialize
+
+        if (REINTERPRET_ATOMICS) {
+            // Each thread initialize a disjoint set of slots so no need for atomic stores.
+            threadgroup int* buckets_ = reinterpret_cast<threadgroup int*>(buckets);
+
+            // Global bucket field is overwrite only so no need to initialize
+            buckets_[offset] = EMPTY_BUCKET_KEY;
+            buckets_[offset + MIN_FIELD] = INT_MAX;
+            buckets_[offset + MAX_FIELD] = INT_MIN;
+            buckets_[offset + SUM_FIELD] = 0;
+            buckets_[offset + COUNT_FIELD] = 0;
+        } else {
+            atomic_store_explicit(&buckets[offset], EMPTY_BUCKET_KEY, memory_order_relaxed);
+            atomic_store_explicit(&buckets[offset + MIN_FIELD], INT_MAX, memory_order_relaxed);
+            atomic_store_explicit(&buckets[offset + MAX_FIELD], INT_MIN, memory_order_relaxed);
+            atomic_store_explicit(&buckets[offset + SUM_FIELD], 0, memory_order_relaxed);
+            atomic_store_explicit(&buckets[offset + COUNT_FIELD], 0, memory_order_relaxed);
+        }
     }
 }
 
@@ -105,18 +119,28 @@ void merge_global_hashmap(
     uint lid,
     uint threadgroup_size
 ) {
-    // TODO threadgroup int* l_buckets = reinterpret_cast<threadgroup int*>(l_buckets_);
-
     for (uint l_bucket_idx = lid; l_bucket_idx < L_HASHMAP_LEN; l_bucket_idx += threadgroup_size) {
         uint l_bucket_offset = l_bucket_idx * L_BUCKET_LEN;
-        int name_idx = atomic_load_explicit(&l_buckets[l_bucket_offset], memory_order_relaxed);
-        int min = atomic_load_explicit(&l_buckets[l_bucket_offset + MIN_FIELD], memory_order_relaxed);
-        int max = atomic_load_explicit(&l_buckets[l_bucket_offset + MAX_FIELD], memory_order_relaxed);
-        int sum = atomic_load_explicit(&l_buckets[l_bucket_offset + SUM_FIELD], memory_order_relaxed);
-        int count = atomic_load_explicit(&l_buckets[l_bucket_offset + COUNT_FIELD], memory_order_relaxed);
-        uint g_bucket_idx = as_type<uint>(
-            atomic_load_explicit(&l_buckets[l_bucket_offset + G_BUCKET_FIELD], memory_order_relaxed));
+        int name_idx, min, max, sum, count, g_bucket_idx;
         uint g_bucket_offset;
+        if (REINTERPRET_ATOMICS) {
+            threadgroup int* l_buckets_ = reinterpret_cast<threadgroup int*>(l_buckets);
+
+            name_idx = l_buckets_[l_bucket_offset];
+            min = l_buckets_[l_bucket_offset + MIN_FIELD];
+            max = l_buckets_[l_bucket_offset + MAX_FIELD];
+            sum = l_buckets_[l_bucket_offset + SUM_FIELD];
+            count = l_buckets_[l_bucket_offset + COUNT_FIELD];
+            g_bucket_idx = as_type<uint>(l_buckets_[l_bucket_offset + G_BUCKET_FIELD]);
+        } else {
+            name_idx = atomic_load_explicit(&l_buckets[l_bucket_offset], memory_order_relaxed);
+            min = atomic_load_explicit(&l_buckets[l_bucket_offset + MIN_FIELD], memory_order_relaxed);
+            max = atomic_load_explicit(&l_buckets[l_bucket_offset + MAX_FIELD], memory_order_relaxed);
+            sum = atomic_load_explicit(&l_buckets[l_bucket_offset + SUM_FIELD], memory_order_relaxed);
+            count = atomic_load_explicit(&l_buckets[l_bucket_offset + COUNT_FIELD], memory_order_relaxed);
+            g_bucket_idx = as_type<uint>(
+                atomic_load_explicit(&l_buckets[l_bucket_offset + G_BUCKET_FIELD], memory_order_relaxed));
+        }
 
         // Open addressing with linear probing
         while (true) {
