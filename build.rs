@@ -26,4 +26,5 @@ fn main() {
     build_metal_kernel("src/bin/gpu_bandwidth_limit/kernel.metal");
     build_metal_kernel("src/bin/gpu_baseline/kernel.metal");
     build_metal_kernel("src/bin/opt0_threadgroup_memory/kernel.metal");
+    build_metal_kernel("src/bin/opt1_reduce_buffer_access/kernel.metal");
 }
