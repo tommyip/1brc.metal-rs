@@ -19,6 +19,30 @@ constant uint G_HASHMAP_LEN [[ function_constant(0) ]];
 
 using namespace metal;
 
+// SIMD-accelerated DJBX33A hash function
+// Advance `i` to one position after the semicolon
+uint64_t hash_name(const device uchar* buf, thread uint* i) {
+    ulong4 hash4 = ulong4(5381);
+    ulong4 semi4 = ulong4((ulong)';');
+    ulong4 char4;
+    bool4 is_semi4;
+    for (;; *i += 4) {
+        char4 = ulong4(buf[*i], buf[*i + 1], buf[*i + 2], buf[*i + 3]);
+        is_semi4 = char4 == semi4;
+        if (any(is_semi4)) break;
+        hash4 = 33 * hash4 + char4;
+    }
+    uint j;
+    for (j = 0; j < 4; ++j) {
+        if (is_semi4[j]) break;
+        hash4[j] = 33 * hash4[j] + char4[j];
+    }
+    *i += j + 1;
+
+    // XORing the lanes together is an arbitrary choice
+    return hash4[0] ^ hash4[1] ^ hash4[2] ^ hash4[3];
+}
+
 // Compare string until `;`
 bool name_eq(
     const device uchar* buf,
@@ -190,11 +214,7 @@ kernel void histogram(
     while (i < end_idx) {
         // read name
         uint name_idx = i;
-        uint64_t hash = 17;
-        uchar c;
-        while ((c = buf[i++]) != ';') {
-            hash = 31 * hash + c;
-        }
+        uint64_t hash = hash_name(buf, &i);
 
         // read temp
         int sign = 1;
@@ -203,6 +223,7 @@ kernel void histogram(
             i = i + 1;
         }
         int temp = 0;
+        char c;
         while ((c = buf[i++]) != '\n') {
             if (c != '.') {
                 temp = temp * 10 + (c - '0');
