@@ -72,6 +72,24 @@ bool name_eq(
     return false;
 }
 
+int read_temp(const device uchar* buf, thread uint* j) {
+    uint i = *j;
+    int sign = 1;
+    if (buf[i] == '-') {
+        sign = -1;
+        ++i;
+    }
+    int temp = buf[i++] - '0';
+    char c = buf[i];
+    if (c != '.') {
+        temp = temp * 10 + (c - '0');
+        ++i;
+    }
+    temp = temp * 10 + (buf[i + 1] - '0');
+    *j = i + 3;
+    return sign * temp;
+}
+
 void init_local_hashmap(threadgroup atomic_int* buckets, uint lid, uint threadgroup_size) {
     for (uint i = lid; i < L_HASHMAP_LEN; i += threadgroup_size) {
         uint offset = i * L_BUCKET_LEN;
@@ -212,25 +230,11 @@ kernel void histogram(
 
     uint i = start_idx;
     while (i < end_idx) {
-        // read name
         uint name_idx = i;
         uint64_t hash = hash_name(buf, &i);
-
-        // read temp
-        int sign = 1;
-        if (buf[i] == '-') {
-            sign = -1;
-            i = i + 1;
-        }
-        int temp = 0;
-        char c;
-        while ((c = buf[i++]) != '\n') {
-            if (c != '.') {
-                temp = temp * 10 + (c - '0');
-            }
-        }
-
-        update_local_hashmap(buf, l_buckets, name_idx, hash, sign * temp);
+        int temp = read_temp(buf, &i);
+        
+        update_local_hashmap(buf, l_buckets, name_idx, hash, temp);
     }
 
     threadgroup_barrier(mem_flags::mem_none);
