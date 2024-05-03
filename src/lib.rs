@@ -1,4 +1,5 @@
 pub mod gpu_baseline;
+pub mod opt2;
 
 use std::{collections::HashMap, env, ffi, fmt, mem::size_of};
 
@@ -93,4 +94,8 @@ pub fn metal_frame_capture(device: &metal::Device, output_url: &str) -> Option<M
     capture_manager.start_capture(&capture_descriptor).unwrap();
 
     Some(MetalCaptureGuard)
+}
+
+pub fn is_newline(c: &u8) -> bool {
+    *c == b'\n'
 }

@@ -1,4 +1,7 @@
-//! # Optimization 1: Reduce global device memory access
+//! # Optimization 2: Elimate edge cases
+//!
+//! Reducing edge cases in GPU kernel allows less branchy code and increase
+//! SIMD opportunities.
 
 use std::{env, fs::File, path::PathBuf};
 
@@ -6,7 +9,7 @@ use metal::{FunctionConstantValues, MTLDataType};
 
 use one_billion_row::{
     c_void,
-    gpu_baseline::{process, HASHMAP_LEN},
+    opt2::{self, HASHMAP_LEN},
 };
 
 fn main() {
@@ -14,14 +17,14 @@ fn main() {
 
     let file = File::open(measurements_path).unwrap();
     let metallib_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("src/bin/opt1_reduce_buffer_access/kernel.metallib");
+        .join("src/bin/opt2_eliminate_edge_cases/kernel.metallib");
     let kernel_constants = FunctionConstantValues::new();
     kernel_constants.set_constant_value_with_name(
         c_void(&(HASHMAP_LEN as u32)),
         MTLDataType::UInt,
         "G_HASHMAP_LEN",
     );
-    process(&file, |device| {
+    opt2::process(&file, |device| {
         device
             .new_library_with_file(&metallib_path)
             .unwrap()

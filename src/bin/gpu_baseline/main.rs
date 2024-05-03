@@ -11,7 +11,7 @@ use metal::{FunctionConstantValues, MTLDataType};
 
 use one_billion_row::{
     c_void,
-    gpu_baseline::{baseline, HASHMAP_LEN},
+    gpu_baseline::{process, HASHMAP_LEN},
 };
 
 fn main() {
@@ -25,7 +25,7 @@ fn main() {
         MTLDataType::UInt,
         "HASHMAP_LEN",
     );
-    baseline(&file, |device| {
+    process(&file, |device| {
         device
             .new_library_with_file(&metallib_path)
             .unwrap()
