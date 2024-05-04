@@ -11,7 +11,6 @@ use metal::{objc::rc::autoreleasepool, Device, MTLSize};
 
 use crate::{
     c_void, device_buffer, is_newline, metal_frame_capture, Station, Stations, I32_SIZE, U32_SIZE,
-    U64_SIZE,
 };
 
 const CHUNK_LEN: u64 = 2 * 1024;
@@ -186,7 +185,6 @@ where
             .new_compute_pipeline_state_with_function(&kernel)
             .unwrap();
 
-        let device_buf = device_buffer(device, &buf);
         let device_buckets = device_buffer(device, &buckets);
 
         for (i, (split_range, &ChopInfo { n_threads, .. })) in
@@ -196,12 +194,12 @@ where
             let threads_per_grid = MTLSize::new(n_threads, 1, 1);
             let threads_per_threadgroup =
                 MTLSize::new(pipeline_state.max_total_threads_per_threadgroup(), 1, 1);
-            let split_range_offset = split_range.start as u64 * U64_SIZE;
             let buckets_offset = HASHMAP_LEN * i as u64 * HASHMAP_FIELDS as u64 * I32_SIZE;
+            let device_split_buf = device_buffer(device, &buf[split_range.clone()]);
 
             let encoder = cmd_buf.new_compute_command_encoder();
             encoder.set_compute_pipeline_state(&pipeline_state);
-            encoder.set_buffer(0, Some(&device_buf), split_range_offset);
+            encoder.set_buffer(0, Some(&device_split_buf), 0);
             encoder.set_buffer(1, Some(&device_buckets), buckets_offset);
             encoder.set_bytes(2, U32_SIZE, c_void(&(split_len as u32)));
             encoder.set_bytes(3, U32_SIZE, c_void(&(CHUNK_LEN as u32)));
