@@ -1,6 +1,6 @@
-use std::fmt;
+use std::{collections::HashSet, fmt};
 
-const STATION_NAMES: [&'static str; 412] = [
+const STATION_NAMES: [&'static str; 413] = [
     "Abha",
     "Abidjan",
     "Abéché",
@@ -263,9 +263,9 @@ const STATION_NAMES: [&'static str; 412] = [
     "Nashville",
     "Nassau",
     "Ndola",
-    ",
-                ",
-    "City",
+    "New Delhi",
+    "New Orleans",
+    "New York City",
     "Ngaoundéré",
     "Niamey",
     "Nicosia",
@@ -416,6 +416,39 @@ const STATION_NAMES: [&'static str; 412] = [
     "Zürich",
 ];
 
+fn name_len_stats() {
+    let n_gt_8 = STATION_NAMES.iter().filter(|name| name.len() > 8).count();
+    let n_gt_11 = STATION_NAMES.iter().filter(|name| name.len() > 11).count();
+    let n_gt_16 = STATION_NAMES.iter().filter(|name| name.len() > 16).count();
+    let max_len = STATION_NAMES.iter().map(|name| name.len()).max().unwrap();
+    let unicode_prefix = STATION_NAMES
+        .iter()
+        .filter(|name| name.as_bytes()[0] >> 7 == 1)
+        .collect::<Vec<_>>();
+    println!(
+        ">8={} >11={} >16={} max={}",
+        n_gt_8, n_gt_11, n_gt_16, max_len,
+    );
+    println!("names with unicode prefix: {:?}", unicode_prefix);
+}
+
+fn min_prefix() {
+    for len in 1.. {
+        let n_unique_prefix = STATION_NAMES
+            .iter()
+            .map(|name| {
+                let name = name.as_bytes();
+                &name[..name.len().min(len)]
+            })
+            .collect::<HashSet<_>>()
+            .len();
+        if n_unique_prefix == STATION_NAMES.len() {
+            println!("Minimimum name prefix name: {}", len);
+            break;
+        }
+    }
+}
+
 fn djbx33a(s: &[u8]) -> u64 {
     s.iter()
         .fold(5381, |h, c| h.wrapping_mul(33).wrapping_add(*c as u64))
@@ -481,6 +514,9 @@ fn main() {
     let global_len = 10_000;
     let threadgroup_len = 1_365;
     println!("Total names: {}", STATION_NAMES.len());
+    name_len_stats();
+    min_prefix();
+
     println!(
         "djbx33a(buckets={}): {}",
         global_len,

@@ -19,28 +19,12 @@ constant uint G_HASHMAP_LEN [[ function_constant(0) ]];
 
 using namespace metal;
 
-// SIMD-accelerated DJBX33A hash function
-// Advance `i` to one position after the semicolon
-uint64_t hash_name(const device uchar* buf, thread uint* i) {
-    ulong4 hash4 = ulong4(5381);
-    ulong4 semi4 = ulong4((ulong)';');
-    ulong4 char4;
-    bool4 is_semi4;
-    for (;; *i += 4) {
-        char4 = ulong4(buf[*i], buf[*i + 1], buf[*i + 2], buf[*i + 3]);
-        is_semi4 = char4 == semi4;
-        if (any(is_semi4)) break;
-        hash4 = 33 * hash4 + char4;
+uint64_t hash_name(const device uchar* buf, uint start, uint end) {
+    uint64_t h = 5381;
+    for (uint i = start; i < end; ++i) {
+        h = 33 * h + buf[i];
     }
-    uint j;
-    for (j = 0; j < 4; ++j) {
-        if (is_semi4[j]) break;
-        hash4[j] = 33 * hash4[j] + char4[j];
-    }
-    *i += j + 1;
-
-    // XORing the lanes together is an arbitrary choice
-    return hash4[0] ^ hash4[1] ^ hash4[2] ^ hash4[3];
+    return h;
 }
 
 // Compare string until `;`
@@ -72,21 +56,20 @@ bool name_eq(
     return false;
 }
 
-int read_temp(const device uchar* buf, thread uint* j) {
-    uint i = *j;
+int read_temp(const device uchar* buf, uint start, uint end) {
+    uint temp_len = end - start;
     int sign = 1;
-    if (buf[i] == '-') {
+    if (buf[start] == '-') {
         sign = -1;
-        ++i;
+        temp_len -= 1;
+        ++start;
     }
-    int temp = buf[i++] - '0';
-    char c = buf[i];
-    if (c != '.') {
-        temp = temp * 10 + (c - '0');
-        ++i;
+    int temp;
+    if (temp_len == 3) {
+        temp = (buf[start] - '0') * 10 + (buf[start+2] - '0');
+    } else {
+        temp = (buf[start] - '0') * 100 + (buf[start+1] - '0') * 10 + (buf[start+3] - '0');
     }
-    temp = temp * 10 + (buf[i + 1] - '0');
-    *j = i + 3;
     return sign * temp;
 }
 
@@ -118,7 +101,7 @@ void update_local_hashmap(
     bool is_empty;
 
     // Open addressing with linear probing
-    while (true) {
+    for (uint i = 0; i < L_HASHMAP_LEN; ++i) {
         bucket_offset = bucket_idx * L_BUCKET_LEN;
         int existing_idx = EMPTY_BUCKET_KEY;
         // Insert name idx if bucket is empty
@@ -175,7 +158,7 @@ void merge_global_hashmap(
         g_bucket_idx = as_type<uint>(l_buckets[l_bucket_offset + G_BUCKET_FIELD]);
 
         // Open addressing with linear probing
-        while (true) {
+        for (uint i = 0; i < G_HASHMAP_LEN; ++i) {
             g_bucket_offset = g_bucket_idx * G_BUCKET_LEN;
             // Insert name idx if bucket is empty
             int existing_idx = EMPTY_BUCKET_KEY;
@@ -214,22 +197,53 @@ kernel void histogram(
     init_local_hashmap(l_buckets, lid, threadgroup_size);
     threadgroup_barrier(mem_flags::mem_none);
 
-    const uint unaligned_start_idx = (uint)gid * chunk_len;
+    const uint chunk_offset = gid * chunk_len;
+    const device uchar* chunk_buf = &buf[chunk_offset];
+    const device packed_uchar4* simd_buf = reinterpret_cast<const device packed_uchar4*>(chunk_buf);
+    const packed_uchar4 semi = packed_uchar4(';');
+    const packed_uchar4 newline = packed_uchar4('\n');
+
+    bool4 eq_semi = simd_buf[0] == semi;
+    bool4 eq_newline = simd_buf[0] == newline; 
+    uint i = 0;
 
     // Align start
-    uint start_idx = unaligned_start_idx;
-    while (buf[start_idx++] != '\n');
-    // End bound does not require aligning as our main loop fully reads each
-    // line.
-    uint end_idx = unaligned_start_idx + chunk_len;
+    while (!any(eq_newline)) {
+        ++i;
+        eq_semi = simd_buf[i] == semi;
+        eq_newline = simd_buf[i] == newline;
+    }
+    uint lane_id = ctz(*reinterpret_cast<thread uint*>(&eq_newline)) >> 3;
+    uint line_offset = 4 * i + lane_id + 1;
+    eq_newline[lane_id] = false;
+    
+    while (i <= chunk_len / 4) {
+        // Find ;
+        while (!any(eq_semi)) {
+            ++i;
+            eq_semi = simd_buf[i] == semi;
+            eq_newline = simd_buf[i] == newline;
+        }
+        lane_id = ctz(*reinterpret_cast<thread uint*>(&eq_semi)) >> 3;
+        eq_semi[lane_id] = false;
+        uint semi_pos = 4 * i + lane_id;
 
-    uint i = start_idx;
-    while (i <= end_idx) {
-        uint name_idx = i;
-        uint64_t hash = hash_name(buf, &i);
-        int temp = read_temp(buf, &i);
+        // Find \n
+        while (!any(eq_newline)) {
+            ++i;
+            eq_semi = simd_buf[i] == semi;
+            eq_newline = simd_buf[i] == newline;
+        }
+        lane_id = ctz(*reinterpret_cast<thread uint*>(&eq_newline)) >> 3;
+        eq_newline[lane_id] = false;
+        uint newline_pos = 4 * i + lane_id;
         
-        update_local_hashmap(buf, l_buckets, name_idx, hash, temp);
+        uint64_t hash = hash_name(chunk_buf, line_offset, semi_pos);
+        int temp = read_temp(chunk_buf, semi_pos + 1, newline_pos);
+        
+        update_local_hashmap(buf, l_buckets, chunk_offset + line_offset, hash, temp);
+
+        line_offset = newline_pos + 1;
     }
 
     threadgroup_barrier(mem_flags::mem_none);
