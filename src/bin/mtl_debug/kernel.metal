@@ -2,9 +2,33 @@
 
 using namespace metal;
 
+
+uint64_t hash_name(const device uchar* chunk_buf, uint start, uint end) {
+    const device packed_uchar4* line_buf = reinterpret_cast<const device packed_uchar4*>(&chunk_buf[start]);
+    uint64_t h = 5381;
+    uint len = end - start;
+    uchar4 chars;
+    uint i;
+    for (i = 0; i < len / 4; ++i) {
+        chars = line_buf[i];
+        h = 33 * h + *reinterpret_cast<thread uint*>(&chars);
+    }
+    uint excess = len % 4;
+    if (excess > 0) {
+        chars = line_buf[i];
+        uint trunc_chars = extract_bits(
+            *reinterpret_cast<thread uint*>(&chars),
+            0,
+            excess * 8
+        );
+        h = 33 * h + trunc_chars;
+    }
+    return h;
+}
+
 kernel void debug(
     const device uchar* buf,
-    device int* res,
+    device uint64_t* res,
     const device uint& len
 ) {
     const packed_uchar4 semi = packed_uchar4(';');
@@ -22,6 +46,7 @@ kernel void debug(
     }
     uint offset = ctz(*reinterpret_cast<thread uint*>(&eq_newline)) >> 3;
     eq_newline[offset] = false;
+    uint line_offset = 4 * i + offset + 1;
     
     for (uint j = 0; j < 3; ++j) {
         while (!any(eq_semi)) {
@@ -46,20 +71,23 @@ kernel void debug(
         uint newline_pos = 4 * i + offset;
         uint temp_len = newline_pos - (semi_pos + 1);
 
-        int sign = 1;
-        uint i = semi_pos + 1;
-        if (buf[i] == '-') {
-            sign = -1;
-            temp_len -= 1;
-            ++i;
-        }
-        int temp;
-        if (temp_len == 3) {
-            temp = (buf[i] - '0') * 10 + (buf[i + 2] - '0');
-        } else {
-            temp = (buf[i] - '0') * 100 + (buf[i+1] - '0') * 10 + (buf[i+3] - '0');
-        }
-        res[j] = sign * temp;
+        res[j] = hash_name(buf, line_offset, semi_pos);
+        // int sign = 1;
+        // uint i = semi_pos + 1;
+        // if (buf[i] == '-') {
+        //     sign = -1;
+        //     temp_len -= 1;
+        //     ++i;
+        // }
+        // int temp;
+        // if (temp_len == 3) {
+        //     temp = (buf[i] - '0') * 10 + (buf[i + 2] - '0');
+        // } else {
+        //     temp = (buf[i] - '0') * 100 + (buf[i+1] - '0') * 10 + (buf[i+3] - '0');
+        // }
+        // res[j] = sign * temp;
+
+        line_offset = newline_pos + 1;
     } 
 
 

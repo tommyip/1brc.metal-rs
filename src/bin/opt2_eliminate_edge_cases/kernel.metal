@@ -19,10 +19,25 @@ constant uint G_HASHMAP_LEN [[ function_constant(0) ]];
 
 using namespace metal;
 
-uint64_t hash_name(const device uchar* buf, uint start, uint end) {
+uint64_t hash_name(const device uchar* chunk_buf, uint start, uint end) {
+    const device packed_uchar4* line_buf = reinterpret_cast<const device packed_uchar4*>(&chunk_buf[start]);
+    const uint len = end - start;
     uint64_t h = 5381;
-    for (uint i = start; i < end; ++i) {
-        h = 33 * h + buf[i];
+    uchar4 chars;
+    uint i;
+    for (i = 0; i < len / 4; ++i) {
+        chars = line_buf[i];
+        h = 33 * h + *reinterpret_cast<thread uint*>(&chars);
+    }
+    const uint excess = len % 4;
+    if (excess > 0) {
+        chars = line_buf[i];
+        uint trunc_chars = extract_bits(
+            *reinterpret_cast<thread uint*>(&chars),
+            0,
+            excess * 8
+        );
+        h = 33 * h + trunc_chars;
     }
     return h;
 }
@@ -33,12 +48,14 @@ bool name_eq(
     uint a_idx,
     uint b_idx
 ) {
-    packed_uchar4 a, b;
-    packed_uchar4 semi(';');
+    const uchar4 semi(';');
+    const device packed_uchar4* a_buf = reinterpret_cast<const device packed_uchar4*>(&buf[a_idx]);
+    const device packed_uchar4* b_buf = reinterpret_cast<const device packed_uchar4*>(&buf[b_idx]);
+    uchar4 a, b;
     bool4 eq;
-    for (;; a_idx += 4, b_idx += 4) {
-        a = packed_uchar4(buf[a_idx], buf[a_idx + 1], buf[a_idx + 2], buf[a_idx + 3]);
-        b = packed_uchar4(buf[b_idx], buf[b_idx + 1], buf[b_idx + 2], buf[b_idx + 3]);
+    for (;; ++a_buf, ++b_buf) {
+        a = *a_buf;
+        b = *b_buf;
         eq = a == b;
         if (any(a == semi | b == semi)) {
             if (!eq[0]) break;

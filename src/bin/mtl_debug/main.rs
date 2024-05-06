@@ -7,8 +7,8 @@ fn main() {
     let metallib_path =
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/bin/mtl_debug/kernel.metallib");
 
-    let buf = "ab;12.5\nj;32.5\ndkffkdsf;-12.4\ndfdf;3.8\n                       ".as_bytes();
-    let res: Vec<i32> = vec![0; 10];
+    let buf = "ab;12.5\nj;32.5\ndkffkdsd;-12.4\ndfdf;3.8\n                       ".as_bytes();
+    let res: Vec<u64> = vec![0; 10];
     autoreleasepool(|| {
         let device = &Device::system_default().unwrap();
         let cmd_q = device.new_command_queue();
