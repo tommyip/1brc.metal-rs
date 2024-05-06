@@ -13,33 +13,39 @@
 // No names start at index 1 so treat it as an empty value
 #define EMPTY_BUCKET_KEY 1
 
+#define BROADCAST_SEMICOLON 0x3B3B3B3B3B3B3B3B
+#define BROADCAST_0x01 0x0101010101010101
+#define BROADCAST_0x80 0x8080808080808080
+#define DOT_BITS 0x10101000
+#define MAGIC_MULTIPLIER (100 * 0x1000000 + 10 * 0x10000 + 1)
+
 #include <metal_stdlib>
 
 constant uint G_HASHMAP_LEN [[ function_constant(0) ]];
 
 using namespace metal;
 
-uint64_t hash_name(const device uchar* chunk_buf, uint start, uint end) {
-    const device packed_uchar4* line_buf = reinterpret_cast<const device packed_uchar4*>(&chunk_buf[start]);
-    const uint len = end - start;
-    uint64_t h = 5381;
-    uchar4 chars;
-    uint i;
-    for (i = 0; i < len / 4; ++i) {
-        chars = line_buf[i];
-        h = 33 * h + *reinterpret_cast<thread uint*>(&chars);
-    }
-    const uint excess = len % 4;
-    if (excess > 0) {
-        chars = line_buf[i];
-        uint trunc_chars = extract_bits(
-            *reinterpret_cast<thread uint*>(&chars),
-            0,
-            excess * 8
-        );
-        h = 33 * h + trunc_chars;
-    }
-    return h;
+
+uint64_t mask_name(uint64_t name_chunk, uint64_t semi_bits) {
+    uint64_t mask = semi_bits ^ (semi_bits - 1);
+    return name_chunk & mask;
+}
+
+uint64_t read_simd(const device uchar* buf, uint i) {
+    const device packed_uchar4* simd_buf = reinterpret_cast<const device packed_uchar4*>(&buf[i]);
+    const uchar4 lo = *simd_buf;
+    const uchar4 hi = *(simd_buf + 1);
+    uint64_t name_chunk = *reinterpret_cast<const thread uint*>(&hi);
+    return name_chunk << 32 | *reinterpret_cast<const thread uint*>(&lo);
+}
+
+int parse_temp(int64_t temp, uint dot_pos) {
+    int shift = 28 - dot_pos;
+    int64_t sign = (~temp << 59) >> 63;
+    int64_t minus_filter = ~(sign & 0xFF);
+    int64_t digits = ((temp & minus_filter) << shift) & 0x0F000F0F00;
+    uint64_t abs_value = (as_type<uint64_t>(digits * MAGIC_MULTIPLIER) >> 32) & 0x3FF;
+    return (abs_value ^ sign) - sign;
 }
 
 // Compare string until `;`
@@ -71,23 +77,6 @@ bool name_eq(
         }
     }
     return false;
-}
-
-int read_temp(const device uchar* buf, uint start, uint end) {
-    uint temp_len = end - start;
-    int sign = 1;
-    if (buf[start] == '-') {
-        sign = -1;
-        temp_len -= 1;
-        ++start;
-    }
-    int temp;
-    if (temp_len == 3) {
-        temp = (buf[start] - '0') * 10 + (buf[start+2] - '0');
-    } else {
-        temp = (buf[start] - '0') * 100 + (buf[start+1] - '0') * 10 + (buf[start+3] - '0');
-    }
-    return sign * temp;
 }
 
 void init_local_hashmap(threadgroup atomic_int* buckets, uint lid, uint threadgroup_size) {
@@ -214,53 +203,36 @@ kernel void histogram(
     init_local_hashmap(l_buckets, lid, threadgroup_size);
     threadgroup_barrier(mem_flags::mem_none);
 
-    const uint chunk_offset = gid * chunk_len;
-    const device uchar* chunk_buf = &buf[chunk_offset];
-    const device packed_uchar4* simd_buf = reinterpret_cast<const device packed_uchar4*>(chunk_buf);
-    const packed_uchar4 semi = packed_uchar4(';');
-    const packed_uchar4 newline = packed_uchar4('\n');
-
-    bool4 eq_semi = simd_buf[0] == semi;
-    bool4 eq_newline = simd_buf[0] == newline; 
-    uint i = 0;
+    uint i = gid * chunk_len;
+    const uint end = i + chunk_len;
 
     // Align start
-    while (!any(eq_newline)) {
-        ++i;
-        eq_semi = simd_buf[i] == semi;
-        eq_newline = simd_buf[i] == newline;
-    }
-    uint lane_id = ctz(*reinterpret_cast<thread uint*>(&eq_newline)) >> 3;
-    uint line_offset = 4 * i + lane_id + 1;
-    eq_newline[lane_id] = false;
-    
-    while (i <= chunk_len / 4) {
-        // Find ;
-        while (!any(eq_semi)) {
-            ++i;
-            eq_semi = simd_buf[i] == semi;
-            eq_newline = simd_buf[i] == newline;
-        }
-        lane_id = ctz(*reinterpret_cast<thread uint*>(&eq_semi)) >> 3;
-        eq_semi[lane_id] = false;
-        uint semi_pos = 4 * i + lane_id;
+    while (buf[i++] != '\n');
 
-        // Find \n
-        while (!any(eq_newline)) {
-            ++i;
-            eq_semi = simd_buf[i] == semi;
-            eq_newline = simd_buf[i] == newline;
+    while (i <= end) {
+        uint name_idx = i;
+        uint64_t hash = 5381;
+        uint64_t name_chunk;
+        uint64_t semi_bits;
+        for (uint j = 0; j <= 100 / 8; ++j) {
+            name_chunk = read_simd(buf, i);
+            uint64_t diff = name_chunk ^ BROADCAST_SEMICOLON;
+            semi_bits = (diff - BROADCAST_0x01) & (~diff & BROADCAST_0x80);
+            if (semi_bits != 0) break;
+            hash = 33 * hash + name_chunk;
+            i += 8;
         }
-        lane_id = ctz(*reinterpret_cast<thread uint*>(&eq_newline)) >> 3;
-        eq_newline[lane_id] = false;
-        uint newline_pos = 4 * i + lane_id;
+        i += (ctz(semi_bits) >> 3) + 1;
+        name_chunk = mask_name(name_chunk, semi_bits);
+        uint64_t mask = semi_bits ^ (semi_bits - 1);
+        name_chunk = name_chunk & mask;
+        hash = 33 * hash + name_chunk;
+        uint64_t temp_chunk = read_simd(buf, i);
+        uint dot_pos = ctz(~temp_chunk & DOT_BITS); 
+        int temp = parse_temp(as_type<int64_t>(temp_chunk), dot_pos);
+        i += (dot_pos >> 3) + 3;
         
-        uint64_t hash = hash_name(chunk_buf, line_offset, semi_pos);
-        int temp = read_temp(chunk_buf, semi_pos + 1, newline_pos);
-        
-        update_local_hashmap(buf, l_buckets, chunk_offset + line_offset, hash, temp);
-
-        line_offset = newline_pos + 1;
+        update_local_hashmap(buf, l_buckets, name_idx, hash, temp);
     }
 
     threadgroup_barrier(mem_flags::mem_none);
