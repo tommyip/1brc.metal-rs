@@ -13,9 +13,8 @@
 // No names start at index 1 so treat it as an empty value
 #define EMPTY_BUCKET_KEY 1
 
-#define BROADCAST_SEMICOLON 0x3B3B3B3B3B3B3B3B
-#define BROADCAST_0x01 0x0101010101010101
-#define BROADCAST_0x80 0x8080808080808080
+#define SEMICOLON 0x3B3B3B3B3B3B3B3B
+#define NEWLINE 0x0A0A0A0A0A0A0A0A
 #define DOT_BITS 0x10101000
 #define MAGIC_MULTIPLIER (100 * 0x1000000 + 10 * 0x10000 + 1)
 
@@ -25,21 +24,48 @@ constant uint G_HASHMAP_LEN [[ function_constant(0) ]];
 
 using namespace metal;
 
+template<uint64_t BROADCAST_CHAR>
+uint64_t swar_find_char(uint64_t input) {
+    uint64_t diff = input ^ BROADCAST_CHAR;
+    return (diff - 0x0101010101010101) & (~diff & 0x8080808080808080);
+}
+
+template uint64_t swar_find_char<NEWLINE>(uint64_t);
+template uint64_t swar_find_char<SEMICOLON>(uint64_t);
 
 uint64_t mask_name(uint64_t name_chunk, uint64_t semi_bits) {
     uint64_t mask = semi_bits ^ (semi_bits - 1);
     return name_chunk & mask;
 }
 
-uint64_t read_simd(const device uchar* buf, uint i) {
-    const device packed_uchar4* simd_buf = reinterpret_cast<const device packed_uchar4*>(&buf[i]);
-    const uchar4 lo = *simd_buf;
-    const uchar4 hi = *(simd_buf + 1);
-    uint64_t name_chunk = *reinterpret_cast<const thread uint*>(&hi);
-    return name_chunk << 32 | *reinterpret_cast<const thread uint*>(&lo);
+void read_simd(
+    const device ulong2* simd_buf,
+    thread ulong4& out, // `out.x` is the output, `out.yzw` is internal lookahead
+    thread uint& simd_offset, // Next `simd_buf` index
+    thread uint& offset, // Offset of `out` to read (internal)
+    uint incr // How much to increment buf by (range: [0, 8])
+) {
+    offset += incr;
+    uint shift_left;
+    uint take_right = offset & 0b111;
+    if (offset < 8) {
+        shift_left = incr;
+    } else if (offset < 16) {
+        out.x = out.y;
+        shift_left = take_right;
+    } else {
+        offset = take_right;
+        shift_left = take_right;
+        out.xy = out.zw;
+        out.zw = simd_buf[simd_offset++];
+    }
+    take_right <<= 3;
+    out.x >>= shift_left << 3;
+    ulong right = offset < 8 ? out.y : out.z;
+    out.x = insert_bits(out.x, right, (64 - take_right) & 0b111111, take_right);
 }
 
-int parse_temp(int64_t temp, uint dot_pos) {
+int swar_parse_temp(int64_t temp, uint dot_pos) {
     int shift = 28 - dot_pos;
     int64_t sign = (~temp << 59) >> 63;
     int64_t minus_filter = ~(sign & 0xFF);
@@ -190,10 +216,10 @@ void merge_global_hashmap(
 }
 
 kernel void histogram(
-    const device uchar* buf,
+    const device uchar* buf, // Must be 16 bytes aligned
     device atomic_int* g_buckets,
     const device uint& buf_len,
-    const device uint& chunk_len,
+    const device uint& chunk_len,  // Must be a multiple of 16 bytes
     uint gid              [[ thread_position_in_grid ]],
     uint lid              [[ thread_position_in_threadgroup ]],
     uint grid_size        [[ threads_per_grid ]],
@@ -204,34 +230,40 @@ kernel void histogram(
     threadgroup_barrier(mem_flags::mem_none);
 
     uint i = gid * chunk_len;
-    const uint end = i + chunk_len;
+    const device ulong2* simd_buf = reinterpret_cast<const device ulong2*>(&buf[i]);
+    ulong4 chunk(simd_buf[0], simd_buf[1]);
+    uint simd_offset = 2;
+    uint offset = 0;
 
     // Align start
-    while (buf[i++] != '\n');
+    uint64_t newline_bits;
+    while ((newline_bits = swar_find_char<NEWLINE>(chunk.x)) == 0) {
+        read_simd(simd_buf, chunk, simd_offset, offset, 8);
+        i += 8;
+    }
+    uint incr = (ctz(newline_bits) >> 3) + 1;
+    i += incr;
 
-    while (i <= end) {
+    while (i <= gid * chunk_len + chunk_len) {
         uint name_idx = i;
         uint64_t hash = 5381;
-        uint64_t name_chunk;
         uint64_t semi_bits;
         for (uint j = 0; j <= 100 / 8; ++j) {
-            name_chunk = read_simd(buf, i);
-            uint64_t diff = name_chunk ^ BROADCAST_SEMICOLON;
-            semi_bits = (diff - BROADCAST_0x01) & (~diff & BROADCAST_0x80);
+            read_simd(simd_buf, chunk, simd_offset, offset, incr);
+            semi_bits = swar_find_char<SEMICOLON>(chunk.x);
             if (semi_bits != 0) break;
-            hash = 33 * hash + name_chunk;
+            hash = 33 * hash + chunk.x;
+            incr = 8;
             i += 8;
         }
-        i += (ctz(semi_bits) >> 3) + 1;
-        name_chunk = mask_name(name_chunk, semi_bits);
-        uint64_t mask = semi_bits ^ (semi_bits - 1);
-        name_chunk = name_chunk & mask;
-        hash = 33 * hash + name_chunk;
-        uint64_t temp_chunk = read_simd(buf, i);
-        uint dot_pos = ctz(~temp_chunk & DOT_BITS); 
-        int temp = parse_temp(as_type<int64_t>(temp_chunk), dot_pos);
-        i += (dot_pos >> 3) + 3;
-        
+        hash = 33 * hash + mask_name(chunk.x, semi_bits);
+        uint temp_pos = (ctz(semi_bits) >> 3) + 1;
+        read_simd(simd_buf, chunk, simd_offset, offset, temp_pos);
+        uint dot_bit_pos = ctz(~chunk.x & DOT_BITS);
+        incr = (dot_bit_pos >> 3) + 3;
+        int temp = swar_parse_temp(as_type<int64_t>(chunk.x), dot_bit_pos);
+        i += temp_pos + incr;
+
         update_local_hashmap(buf, l_buckets, name_idx, hash, temp);
     }
 

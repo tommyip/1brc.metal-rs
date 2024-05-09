@@ -1,3 +1,4 @@
+use core::slice;
 use std::{
     collections::HashMap,
     fs::File,
@@ -13,7 +14,11 @@ use crate::{
     c_void, device_buffer, is_newline, metal_frame_capture, Station, Stations, I32_SIZE, U32_SIZE,
 };
 
-const CHUNK_LEN: u64 = 2 * 1024;
+const CHUNK_LEN: u64 = {
+    let len = 2 * 1024;
+    assert!(len % 16 == 0);
+    len
+};
 const MAX_NAMES: u64 = 10_000;
 /// Target 50% load factor
 pub const HASHMAP_LEN: u64 = MAX_NAMES * 2;
@@ -111,35 +116,44 @@ fn split_aligned_measurements<const MAX_SIZE: usize>(buf: &[u8]) -> Vec<Range<us
 }
 
 struct ChopInfo<'a> {
-    /// Exactly one line
+    /// 16-byte aligned offset of GPU chunk
+    body_offset: u64,
+    /// Contain complete lines
     head: &'a [u8],
-    /// At least one line
+    /// Contain complete lines
     tail: &'a [u8],
     /// How many GPU kernels to spawn to handle the buffer
     n_threads: u64,
 }
 
-/// Chop off the head and tail lines of the GPU buffer so each kernel can align
-/// itself uniformly by finding the next newline at the boundaries. This also allows
-/// the kernel to read a large block of buffer without accounting for out of bound
-/// access.
-fn chop_head_and_tail<'a, const CHUNK_LEN: usize, const MIN_TAIL_LEN: usize>(
-    buf: &'a [u8],
-) -> ChopInfo<'a> {
-    let head_offset = buf.iter().position(is_newline).unwrap() + 1;
-    let tail_offset = buf[..buf.len() - MIN_TAIL_LEN]
-        .iter()
-        .rposition(is_newline)
-        .unwrap()
+/// Chop off the head and tail lines of the GPU buffer. Chopping off the head is needed
+/// for aligning our buffer to 16 bytes multiplies. Chopping off the tail allow us
+/// to read 16 bytes at a time without going out of bounds at the end.
+fn chop_head_and_tail<'a, const CHUNK_LEN: usize>(buf: &'a [u8]) -> ChopInfo<'a> {
+    let (prefix, middle) = unsafe {
+        let (prefix, middle, _) = buf.align_to::<u128>();
+        let middle = slice::from_raw_parts(
+            (middle.as_ptr() as *const u128) as *const u8,
+            middle.len() * 16,
+        );
+        (prefix, middle)
+    };
+    let body_offset = prefix.len();
+    let head_offset = middle.iter().position(is_newline).unwrap() + 1;
+    let n_threads = (buf.len() - 16 - body_offset) / CHUNK_LEN;
+    let unaligned_tail_offset = body_offset + n_threads * CHUNK_LEN;
+    let tail_offset = unaligned_tail_offset
+        + buf[unaligned_tail_offset..]
+            .iter()
+            .position(is_newline)
+            .unwrap()
         + 1;
-    let n_threads = (tail_offset / CHUNK_LEN) as u64
-        // If the chunk end align exactly at the split boundary then the n-2 th
-        // thread would have extended its bound to here.
-        - (tail_offset % CHUNK_LEN == 0) as u64;
+
     ChopInfo {
         head: &buf[..head_offset],
+        body_offset: body_offset as u64,
         tail: &buf[tail_offset..],
-        n_threads,
+        n_threads: n_threads as u64,
     }
 }
 
@@ -152,7 +166,7 @@ where
     let split_ranges = split_aligned_measurements::<{ u32::MAX as usize }>(&buf);
     let chop_infos = split_ranges
         .iter()
-        .map(|range| chop_head_and_tail::<{ CHUNK_LEN as usize }, 8>(&buf[range.clone()]))
+        .map(|range| chop_head_and_tail::<{ CHUNK_LEN as usize }>(&buf[range.clone()]))
         .collect::<Vec<_>>();
 
     // A connected list of hashmaps mapping station name (as offset)
@@ -187,10 +201,19 @@ where
 
         let device_buckets = device_buffer(device, &buckets);
 
-        for (i, (split_range, &ChopInfo { n_threads, .. })) in
-            split_ranges.iter().zip(&chop_infos).enumerate()
+        for (
+            i,
+            (
+                split_range,
+                &ChopInfo {
+                    n_threads,
+                    body_offset,
+                    ..
+                },
+            ),
+        ) in split_ranges.iter().zip(&chop_infos).enumerate()
         {
-            let split_len = split_range.len() as u64;
+            let split_len = split_range.len() as u64 - body_offset;
             let threads_per_grid = MTLSize::new(n_threads, 1, 1);
             let threads_per_threadgroup =
                 MTLSize::new(pipeline_state.max_total_threads_per_threadgroup(), 1, 1);
@@ -199,7 +222,7 @@ where
 
             let encoder = cmd_buf.new_compute_command_encoder();
             encoder.set_compute_pipeline_state(&pipeline_state);
-            encoder.set_buffer(0, Some(&device_split_buf), 0);
+            encoder.set_buffer(0, Some(&device_split_buf), body_offset);
             encoder.set_buffer(1, Some(&device_buckets), buckets_offset);
             encoder.set_bytes(2, U32_SIZE, c_void(&(split_len as u32)));
             encoder.set_bytes(3, U32_SIZE, c_void(&(CHUNK_LEN as u32)));

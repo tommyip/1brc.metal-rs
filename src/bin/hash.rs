@@ -468,6 +468,16 @@ fn djbx33a_x4(s: &[u8]) -> u64 {
     h[0] ^ h[1] ^ h[2] ^ h[3]
 }
 
+fn djbx33a_u64(s: &[u8]) -> u64 {
+    let mut h: u64 = 5381;
+    for chunk in s.chunks(8) {
+        let mut buf = [0u8; 8];
+        buf[..chunk.len()].copy_from_slice(chunk);
+        h = h.wrapping_mul(33).wrapping_add(u64::from_le_bytes(buf));
+    }
+    h
+}
+
 struct Stats {
     min: u32,
     max: u32,
@@ -537,4 +547,5 @@ fn main() {
         threadgroup_len,
         statistics(djbx33a_x4, threadgroup_len)
     );
+    println!("djbx33a_u64: {}", djbx33a_u64("abce;".as_bytes()))
 }

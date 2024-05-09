@@ -1,3 +1,4 @@
+use core::slice;
 use std::{ffi, mem::size_of, path::PathBuf};
 
 use metal::{objc::rc::autoreleasepool, Device, MTLSize};
@@ -21,12 +22,26 @@ fn swar(buf: &[u8]) {
     println!("len: {}", len);
 }
 
+fn u64_to_str(x: u64) -> Option<String> {
+    std::str::from_utf8(&x.to_le_bytes())
+        .ok()
+        .map(|x| x.to_owned())
+}
+
 fn main() {
     let metallib_path =
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/bin/mtl_debug/kernel.metallib");
 
-    let buf =
-        "abce;1.5\nabc;32.5\ndkfsfdsfdsfdsfdsfds;12.4\nabce;-3.8\n                     ".as_bytes();
+    let unaligned_buf =
+        "abcde;-1.5\nabdafdsfdsfs;32.5\ndkfsfdsfdsfdsfdsfds;-12.4\ndsfadsfdsfadsfjdkfjkdsjfkd;0.8\nabce;-3.8\n                     ".as_bytes();
+    let (buf_prefix, buf, buf_suffix) = unsafe { unaligned_buf.align_to::<u128>() };
+    let buf = unsafe {
+        slice::from_raw_parts::<u8>(
+            std::mem::transmute(buf.as_ptr()),
+            buf.len() * size_of::<u128>() / size_of::<u8>(),
+        )
+    };
+    println!("{} {} {}", buf_prefix.len(), buf.len(), buf_suffix.len());
     let res: Vec<i32> = vec![0; 10];
     autoreleasepool(|| {
         let device = &Device::system_default().unwrap();
@@ -61,7 +76,12 @@ fn main() {
         cmd_buf.wait_until_completed();
     });
 
-    // println!("{:064b}", res[2]);
+    println!("{}", std::str::from_utf8(buf).unwrap());
+    // println!("{:064b}", res[0]);
+    // println!("{:x} {:x} {:x} {:x}", res[0], res[1], res[2], res[3]);
+    // println!("{:?}", res.into_iter().map(u64_to_str).collect::<Vec<_>>());
+    // println!("{:?}", u64_to_str(res[0]));
+    // println!("{:064b} {}", res[1], res[2]);
     println!("{:?}", res);
-    swar(&buf[..]);
+    // swar(&buf[..]);
 }
