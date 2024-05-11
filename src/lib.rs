@@ -79,7 +79,7 @@ impl Drop for MetalCaptureGuard {
 }
 
 pub fn metal_frame_capture(device: &metal::Device, output_url: &str) -> Option<MetalCaptureGuard> {
-    if !env::var("METAL_CAPTURE_ENABLED")
+    if !env::var("MTL_CAPTURE_ENABLED")
         .ok()
         .is_some_and(|x| &x == "1")
     {

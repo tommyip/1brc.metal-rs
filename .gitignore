@@ -2,5 +2,6 @@
 *.txt
 *.metalar
 *.metallib
+*.metallibsym
 .DS_Store
 *.gputrace
