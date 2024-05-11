@@ -42,27 +42,26 @@ void read_simd(
     const device ulong2* simd_buf,
     thread ulong4& out, // `out.x` is the output, `out.yzw` is internal lookahead
     thread uint& simd_offset, // Next `simd_buf` index
-    thread uint& offset, // Offset of `out` to read (internal)
-    uint incr // How much to increment buf by (range: [0, 8])
+    thread uint& offset, // Offset of `out` to read (internal) in number of bits from LSB
+    uint incr // How much to increment buf by (range: [0, 64]) in bits (multiple of 8)
 ) {
+    incr <<= 3;
     offset += incr;
-    uint shift_left;
-    uint take_right = offset & 0b111;
-    if (offset < 8) {
+    uint offset_mod64 = offset & 0b111111;
+    uint shift_left = offset_mod64;
+    if (offset < 64) {
         shift_left = incr;
-    } else if (offset < 16) {
+    } else if (offset < 128) {
         out.x = out.y;
-        shift_left = take_right;
     } else {
-        offset = take_right;
-        shift_left = take_right;
-        out.xy = out.zw;
-        out.zw = simd_buf[simd_offset++];
+        offset = shift_left;
+        out = ulong4(out.zw, simd_buf[simd_offset++]);
     }
-    take_right <<= 3;
-    out.x >>= shift_left << 3;
-    ulong right = offset < 8 ? out.y : out.z;
-    out.x = insert_bits(out.x, right, (64 - take_right) & 0b111111, take_right);
+    out.x >>= shift_left;
+    if (shift_left > 0) {
+        ulong right = offset < 64 ? out.y : out.z;
+        out.x |= right << (64 - offset_mod64);
+    }
 }
 
 int swar_parse_temp(int64_t temp, uint dot_pos) {
@@ -260,9 +259,9 @@ kernel void histogram(
         uint temp_pos = (ctz(semi_bits) >> 3) + 1;
         read_simd(simd_buf, chunk, simd_offset, offset, temp_pos);
         uint dot_bit_pos = ctz(~chunk.x & DOT_BITS);
-        incr = (dot_bit_pos >> 3) + 3;
         int temp = swar_parse_temp(as_type<int64_t>(chunk.x), dot_bit_pos);
-        i += temp_pos + incr;
+        incr = (dot_bit_pos >> 3) + 3;
+        i += temp_pos + incr;;
 
         update_local_hashmap(buf, l_buckets, name_idx, hash, temp);
     }

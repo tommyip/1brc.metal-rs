@@ -4,11 +4,11 @@ use std::{ffi, mem::size_of, path::PathBuf};
 use metal::{objc::rc::autoreleasepool, Device, MTLSize};
 use one_billion_row::device_buffer;
 
-fn swar(buf: &[u8]) {
+fn swar_find_semi(buf: &[u8]) {
     const BROADCAST_SEMICOLON: u64 = 0x3B3B3B3B3B3B3B3B;
     const BROADCAST_0X01: u64 = 0x0101010101010101;
     const BROADCAST_0X80: u64 = 0x8080808080808080;
-    println!("swar");
+    println!("swar find semi");
 
     let mut chunk = [0u8; 8];
     chunk.copy_from_slice(&buf[..8]);
@@ -16,13 +16,23 @@ fn swar(buf: &[u8]) {
 
     let diff = word ^ BROADCAST_SEMICOLON;
     let semi_bits = (diff - BROADCAST_0X01) & (!diff & BROADCAST_0X80);
-    let len = semi_bits.trailing_zeros() >> 3;
-    println!("{:064b}", word);
-    println!("{:064b}", semi_bits);
-    println!("len: {}", len);
+    println!("semi input {:064b}", word);
+    println!("semi bits  {:064b}", semi_bits);
+    println!("semi pos   {}", semi_bits.trailing_zeros());
 }
 
-fn u64_to_str(x: u64) -> Option<String> {
+fn swar_find_dot(buf: &[u8]) {
+    const DOT_BITS: u64 = 0x10101000;
+    let mut chunk = [0u8; 8];
+    chunk.copy_from_slice(&buf[..8]);
+    let word = u64::from_le_bytes(chunk);
+
+    let dot_pos = (!word & DOT_BITS).trailing_zeros();
+    println!("dot pos {}", dot_pos);
+    println!("dot pos / 8 = {}", dot_pos >> 3);
+}
+
+fn u64_to_str(x: &u64) -> Option<String> {
     std::str::from_utf8(&x.to_le_bytes())
         .ok()
         .map(|x| x.to_owned())
@@ -33,7 +43,7 @@ fn main() {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/bin/mtl_debug/kernel.metallib");
 
     let unaligned_buf =
-        "abcde;-1.5\nabdafdsfdsfs;32.5\ndkfsfdsfdsfdsfdsfds;-12.4\ndsfadsfdsfadsfjdkfjkdsjfkd;0.8\nabce;-3.8\n                     ".as_bytes();
+        "abc;-1.5\nabdafdsfdsfs;32.5\ndkfsfdsfdsfdsfdsfds;-12.4\ndsfadsfdsfadsfjdkfjkdsjfkd;0.8\nabce;-3.8\n                     ".as_bytes();
     let (buf_prefix, buf, buf_suffix) = unsafe { unaligned_buf.align_to::<u128>() };
     let buf = unsafe {
         slice::from_raw_parts::<u8>(
@@ -42,7 +52,7 @@ fn main() {
         )
     };
     println!("{} {} {}", buf_prefix.len(), buf.len(), buf_suffix.len());
-    let res: Vec<i32> = vec![0; 10];
+    let res: Vec<u64> = vec![0; 10];
     autoreleasepool(|| {
         let device = &Device::system_default().unwrap();
         let cmd_q = device.new_command_queue();
@@ -77,11 +87,8 @@ fn main() {
     });
 
     println!("{}", std::str::from_utf8(buf).unwrap());
-    // println!("{:064b}", res[0]);
-    // println!("{:x} {:x} {:x} {:x}", res[0], res[1], res[2], res[3]);
-    // println!("{:?}", res.into_iter().map(u64_to_str).collect::<Vec<_>>());
-    // println!("{:?}", u64_to_str(res[0]));
-    // println!("{:064b} {}", res[1], res[2]);
+    println!("{:?}", res.iter().map(u64_to_str).collect::<Vec<_>>());
     println!("{:?}", res);
-    // swar(&buf[..]);
+    swar_find_semi("0;123456".as_bytes());
+    swar_find_dot("1.5\nabcd".as_bytes());
 }
