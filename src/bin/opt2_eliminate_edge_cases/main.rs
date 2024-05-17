@@ -1,7 +1,7 @@
-//! # Optimization 2: Elimate edge cases
+//! # Optimization 2: SWAR and SIMD
 //!
-//! Reducing edge cases in GPU kernel allows less branchy code and increase
-//! SIMD opportunities.
+//! Use SWAR techniques for finding semicolons and newlines. Also
+//! reduce device buffer read pressure with aligned 16-byte reads.
 
 use std::{env, fs::File, path::PathBuf};
 

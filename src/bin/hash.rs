@@ -1,420 +1,9 @@
-use std::{collections::HashSet, fmt};
+#![allow(dead_code)]
 
-const STATION_NAMES: [&'static str; 413] = [
-    "Abha",
-    "Abidjan",
-    "Abéché",
-    "Accra",
-    "Addis Ababa",
-    "Adelaide",
-    "Aden",
-    "Ahvaz",
-    "Albuquerque",
-    "Alexandra",
-    "Alexandria",
-    "Algiers",
-    "Alice Springs",
-    "Almaty",
-    "Amsterdam",
-    "Anadyr",
-    "Anchorage",
-    "Andorra la Vella",
-    "Ankara",
-    "Antananarivo",
-    "Antsiranana",
-    "Arkhangelsk",
-    "Ashgabat",
-    "Asmara",
-    "Assab",
-    "Astana",
-    "Athens",
-    "Atlanta",
-    "Auckland",
-    "Austin",
-    "Baghdad",
-    "Baguio",
-    "Baku",
-    "Baltimore",
-    "Bamako",
-    "Bangkok",
-    "Bangui",
-    "Banjul",
-    "Barcelona",
-    "Bata",
-    "Batumi",
-    "Beijing",
-    "Beirut",
-    "Belgrade",
-    "Belize City",
-    "Benghazi",
-    "Bergen",
-    "Berlin",
-    "Bilbao",
-    "Birao",
-    "Bishkek",
-    "Bissau",
-    "Blantyre",
-    "Bloemfontein",
-    "Boise",
-    "Bordeaux",
-    "Bosaso",
-    "Boston",
-    "Bouaké",
-    "Bratislava",
-    "Brazzaville",
-    "Bridgetown",
-    "Brisbane",
-    "Brussels",
-    "Bucharest",
-    "Budapest",
-    "Bujumbura",
-    "Bulawayo",
-    "Burnie",
-    "Busan",
-    "Cabo San Lucas",
-    "Cairns",
-    "Cairo",
-    "Calgary",
-    "Canberra",
-    "Cape Town",
-    "Changsha",
-    "Charlotte",
-    "Chiang Mai",
-    "Chicago",
-    "Chihuahua",
-    "Chișinău",
-    "Chittagong",
-    "Chongqing",
-    "Christchurch",
-    "City of San Marino",
-    "Colombo",
-    "Columbus",
-    "Conakry",
-    "Copenhagen",
-    "Cotonou",
-    "Cracow",
-    "Da Lat",
-    "Da Nang",
-    "Dakar",
-    "Dallas",
-    "Damascus",
-    "Dampier",
-    "Dar es Salaam",
-    "Darwin",
-    "Denpasar",
-    "Denver",
-    "Detroit",
-    "Dhaka",
-    "Dikson",
-    "Dili",
-    "Djibouti",
-    "Dodoma",
-    "Dolisie",
-    "Douala",
-    "Dubai",
-    "Dublin",
-    "Dunedin",
-    "Durban",
-    "Dushanbe",
-    "Edinburgh",
-    "Edmonton",
-    "El Paso",
-    "Entebbe",
-    "Erbil",
-    "Erzurum",
-    "Fairbanks",
-    "Fianarantsoa",
-    "Flores,  Petén",
-    "Frankfurt",
-    "Fresno",
-    "Fukuoka",
-    "Gabès",
-    "Gaborone",
-    "Gagnoa",
-    "Gangtok",
-    "Garissa",
-    "Garoua",
-    "George Town",
-    "Ghanzi",
-    "Gjoa Haven",
-    "Guadalajara",
-    "Guangzhou",
-    "Guatemala City",
-    "Halifax",
-    "Hamburg",
-    "Hamilton",
-    "Hanga Roa",
-    "Hanoi",
-    "Harare",
-    "Harbin",
-    "Hargeisa",
-    "Hat Yai",
-    "Havana",
-    "Helsinki",
-    "Heraklion",
-    "Hiroshima",
-    "Ho Chi Minh City",
-    "Hobart",
-    "Hong Kong",
-    "Honiara",
-    "Honolulu",
-    "Houston",
-    "Ifrane",
-    "Indianapolis",
-    "Iqaluit",
-    "Irkutsk",
-    "Istanbul",
-    "İzmir",
-    "Jacksonville",
-    "Jakarta",
-    "Jayapura",
-    "Jerusalem",
-    "Johannesburg",
-    "Jos",
-    "Juba",
-    "Kabul",
-    "Kampala",
-    "Kandi",
-    "Kankan",
-    "Kano",
-    "Kansas City",
-    "Karachi",
-    "Karonga",
-    "Kathmandu",
-    "Khartoum",
-    "Kingston",
-    "Kinshasa",
-    "Kolkata",
-    "Kuala Lumpur",
-    "Kumasi",
-    "Kunming",
-    "Kuopio",
-    "Kuwait City",
-    "Kyiv",
-    "Kyoto",
-    "La Ceiba",
-    "La Paz",
-    "Lagos",
-    "Lahore",
-    "Lake Havasu City",
-    "Lake Tekapo",
-    "Las Palmas de Gran Canaria",
-    "Las Vegas",
-    "Launceston",
-    "Lhasa",
-    "Libreville",
-    "Lisbon",
-    "Livingstone",
-    "Ljubljana",
-    "Lodwar",
-    "Lomé",
-    "London",
-    "Los Angeles",
-    "Louisville",
-    "Luanda",
-    "Lubumbashi",
-    "Lusaka",
-    "Luxembourg City",
-    "Lviv",
-    "Lyon",
-    "Madrid",
-    "Mahajanga",
-    "Makassar",
-    "Makurdi",
-    "Malabo",
-    "Malé",
-    "Managua",
-    "Manama",
-    "Mandalay",
-    "Mango",
-    "Manila",
-    "Maputo",
-    "Marrakesh",
-    "Marseille",
-    "Maun",
-    "Medan",
-    "Mek'ele",
-    "Melbourne",
-    "Memphis",
-    "Mexicali",
-    "Mexico City",
-    "Miami",
-    "Milan",
-    "Milwaukee",
-    "Minneapolis",
-    "Minsk",
-    "Mogadishu",
-    "Mombasa",
-    "Monaco",
-    "Moncton",
-    "Monterrey",
-    "Montreal",
-    "Moscow",
-    "Mumbai",
-    "Murmansk",
-    "Muscat",
-    "Mzuzu",
-    "N'Djamena",
-    "Naha",
-    "Nairobi",
-    "Nakhon Ratchasima",
-    "Napier",
-    "Napoli",
-    "Nashville",
-    "Nassau",
-    "Ndola",
-    "New Delhi",
-    "New Orleans",
-    "New York City",
-    "Ngaoundéré",
-    "Niamey",
-    "Nicosia",
-    "Niigata",
-    "Nouadhibou",
-    "Nouakchott",
-    "Novosibirsk",
-    "Nuuk",
-    "Odesa",
-    "Odienné",
-    "Oklahoma City",
-    "Omaha",
-    "Oranjestad",
-    "Oslo",
-    "Ottawa",
-    "Ouagadougou",
-    "Ouahigouya",
-    "Ouarzazate",
-    "Oulu",
-    "Palembang",
-    "Palermo",
-    "Palm Springs",
-    "Palmerston North",
-    "Panama City",
-    "Parakou",
-    "Paris",
-    "Perth",
-    "Petropavlovsk-Kamchatsky",
-    "Philadelphia",
-    "Phnom Penh",
-    "Phoenix",
-    "Pittsburgh",
-    "Podgorica",
-    "Pointe-Noire",
-    "Pontianak",
-    "Port Moresby",
-    "Port Sudan",
-    "Port Vila",
-    "Port-Gentil",
-    "Portland (OR)",
-    "Porto",
-    "Prague",
-    "Praia",
-    "Pretoria",
-    "Pyongyang",
-    "Rabat",
-    "Rangpur",
-    "Reggane",
-    "Reykjavík",
-    "Riga",
-    "Riyadh",
-    "Rome",
-    "Roseau",
-    "Rostov-on-Don",
-    "Sacramento",
-    "Saint Petersburg",
-    "Saint-Pierre",
-    "Salt Lake City",
-    "San Antonio",
-    "San Diego",
-    "San Francisco",
-    "San Jose",
-    "San José",
-    "San Juan",
-    "San Salvador",
-    "Sana'a",
-    "Santo Domingo",
-    "Sapporo",
-    "Sarajevo",
-    "Saskatoon",
-    "Seattle",
-    "Ségou",
-    "Seoul",
-    "Seville",
-    "Shanghai",
-    "Singapore",
-    "Skopje",
-    "Sochi",
-    "Sofia",
-    "Sokoto",
-    "Split",
-    "St. John's",
-    "St. Louis",
-    "Stockholm",
-    "Surabaya",
-    "Suva",
-    "Suwałki",
-    "Sydney",
-    "Tabora",
-    "Tabriz",
-    "Taipei",
-    "Tallinn",
-    "Tamale",
-    "Tamanrasset",
-    "Tampa",
-    "Tashkent",
-    "Tauranga",
-    "Tbilisi",
-    "Tegucigalpa",
-    "Tehran",
-    "Tel Aviv",
-    "Thessaloniki",
-    "Thiès",
-    "Tijuana",
-    "Timbuktu",
-    "Tirana",
-    "Toamasina",
-    "Tokyo",
-    "Toliara",
-    "Toluca",
-    "Toronto",
-    "Tripoli",
-    "Tromsø",
-    "Tucson",
-    "Tunis",
-    "Ulaanbaatar",
-    "Upington",
-    "Ürümqi",
-    "Vaduz",
-    "Valencia",
-    "Valletta",
-    "Vancouver",
-    "Veracruz",
-    "Vienna",
-    "Vientiane",
-    "Villahermosa",
-    "Vilnius",
-    "Virginia Beach",
-    "Vladivostok",
-    "Warsaw",
-    "Washington, D.C.",
-    "Wau",
-    "Wellington",
-    "Whitehorse",
-    "Wichita",
-    "Willemstad",
-    "Winnipeg",
-    "Wrocław",
-    "Xi'an",
-    "Yakutsk",
-    "Yangon",
-    "Yaoundé",
-    "Yellowknife",
-    "Yerevan",
-    "Yinchuan",
-    "Zagreb",
-    "Zanzibar City",
-    "Zürich",
-];
+use std::{collections::HashSet, fmt, ops::BitXor};
+
+use one_billion_row::STATION_NAMES;
+use ptr_hash::{hash::Hasher, DefaultPtrHash, PtrHash, PtrHashParams};
 
 fn name_len_stats() {
     let n_gt_8 = STATION_NAMES.iter().filter(|name| name.len() > 8).count();
@@ -478,6 +67,38 @@ fn djbx33a_u64(s: &[u8]) -> u64 {
     h
 }
 
+fn djbx33a_u64_parametric(s: &[u8], seed: u64, mul: u64) -> u64 {
+    let mut h = seed;
+    for chunk in s.chunks(8) {
+        let mut buf = [0u8; 8];
+        buf[..chunk.len()].copy_from_slice(chunk);
+        h = h.wrapping_mul(mul).wrapping_add(u64::from_le_bytes(buf));
+    }
+    h
+}
+
+#[derive(Clone)]
+pub struct FxHash;
+
+impl FxHash {
+    const K: u64 = 0x517cc1b727220a95;
+}
+
+impl Hasher<&str> for FxHash {
+    type H = u64;
+
+    fn hash(x: &&str, _seed: u64) -> Self::H {
+        let mut h: u64 = 0;
+        for chunk in x.as_bytes().chunks(8) {
+            let mut buf = [0u8; 8];
+            buf[..chunk.len()].copy_from_slice(chunk);
+            let i = u64::from_le_bytes(buf);
+            h = h.rotate_left(5).bitxor(i).wrapping_mul(Self::K);
+        }
+        h
+    }
+}
+
 struct Stats {
     min: u32,
     max: u32,
@@ -520,32 +141,83 @@ where
     }
 }
 
+fn ptrhash(hash: u64) -> usize {
+    const C: u64 = 0x517cc1b727220a95;
+    let pilots: Vec<u8> = vec![
+        50, 110, 71, 13, 18, 27, 21, 14, 10, 16, 1, 14, 6, 11, 0, 2, 17, 2, 1, 4, 68, 79, 21, 0,
+        22, 20, 60, 12, 30, 53, 62, 78, 27, 17, 2, 17, 13, 43, 21, 108, 19, 12, 25, 1, 55, 36, 1,
+        0, 4, 184, 0, 21, 69, 25, 13, 177, 11, 97, 3, 29, 14, 104, 30, 4, 50, 23, 6, 102, 137, 10,
+        227, 32, 29, 21, 7, 4, 244, 0,
+    ];
+    let rem_c1: u64 = 38;
+    let rem_c2: u64 = 132;
+    let c3 = -55;
+    let p1 = 11068046444225730560;
+    let is_large = hash >= p1;
+    let rem = if is_large { rem_c2 } else { rem_c1 };
+    let bucket = (is_large as isize * c3) + ((hash as u128 * rem as u128) >> 64) as isize;
+    let pilot = pilots[bucket as usize];
+    return ((C as u128 * (hash ^ C.wrapping_mul(pilot as u64)) as u128) >> 64) as usize
+        & ((1 << 9) - 1) as usize;
+}
+
 fn main() {
-    let global_len = 10_000;
-    let threadgroup_len = 1_365;
-    println!("Total names: {}", STATION_NAMES.len());
-    name_len_stats();
-    min_prefix();
+    let params = PtrHashParams {
+        alpha: 0.9,
+        c: 1.5,
+        slots_per_part: STATION_NAMES.len() * 2,
+        ..Default::default()
+    };
+    let mphf: PtrHash<&str, ptr_hash::local_ef::LocalEf, FxHash> =
+        DefaultPtrHash::new(&STATION_NAMES, params);
+
+    println!("{}", mphf.index(&"Hong Kong"));
+    // ptrhash(FxHash::hash(&"Hong Kong", 0));
+
+    // let mut taken = vec![false; 512];
+    // for name in STATION_NAMES {
+    //     let ref_idx = mphf.index(&name);
+    //     let idx = ptrhash(FxHash::hash(&name, 0));
+    //     assert_eq!(ref_idx, idx);
+    //     assert!(!taken[ref_idx]);
+    //     taken[ref_idx] = true;
+    // }
 
     println!(
-        "djbx33a(buckets={}): {}",
-        global_len,
-        statistics(djbx33a, global_len)
+        "{}",
+        STATION_NAMES.map(|x| x.len()).into_iter().max().unwrap()
     );
-    println!(
-        "djbx33a(buckets={}): {}",
-        threadgroup_len,
-        statistics(djbx33a, threadgroup_len)
-    );
-    println!(
-        "djbx33a_x4(buckets={}): {}",
-        global_len,
-        statistics(djbx33a_x4, global_len)
-    );
-    println!(
-        "djbx33a_x4(buckets={}): {}",
-        threadgroup_len,
-        statistics(djbx33a_x4, threadgroup_len)
-    );
-    println!("djbx33a_u64: {}", djbx33a_u64("abce;".as_bytes()))
+
+    // let global_len = 10_000;
+    // let threadgroup_len = 1_365;
+    // println!("Total names: {}", STATION_NAMES.len());
+    // name_len_stats();
+    // min_prefix();
+
+    // println!(
+    //     "djbx33a(buckets={}): {}",
+    //     global_len,
+    //     statistics(djbx33a, global_len)
+    // );
+    // println!(
+    //     "djbx33a(buckets={}): {}",
+    //     threadgroup_len,
+    //     statistics(djbx33a, threadgroup_len)
+    // );
+    // println!(
+    //     "djbx33a_x4(buckets={}): {}",
+    //     global_len,
+    //     statistics(djbx33a_x4, global_len)
+    // );
+    // println!(
+    //     "djbx33a_x4(buckets={}): {}",
+    //     threadgroup_len,
+    //     statistics(djbx33a_x4, threadgroup_len)
+    // );
+    // println!(
+    //     "djbx33a_u64(buckets={}): {}",
+    //     1024,
+    //     statistics(djbx33a_u64, threadgroup_len)
+    // );
+    // find_perfect_hash(1024);
 }
