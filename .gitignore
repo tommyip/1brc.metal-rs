@@ -1,7 +1,12 @@
 /target
+.DS_Store
+# Measurement outputs
 *.txt
+# Compiled Metal libraries
 *.metalar
 *.metallib
 *.metallibsym
-.DS_Store
+# Metal frame capture
 *.gputrace
+# Flamegraph
+*.svg
