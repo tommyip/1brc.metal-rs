@@ -1,6 +1,7 @@
 pub mod gpu_baseline;
 pub mod opt2;
 pub mod opt3;
+pub mod opt4;
 
 use std::{collections::HashMap, env, ffi, fmt, mem::size_of};
 
@@ -445,6 +446,19 @@ pub struct Station {
     max: i32,
     sum: i32,
     count: i32,
+}
+
+impl Station {
+    pub fn merge(&mut self, other: &Station) {
+        if other.min < self.min {
+            self.min = other.min;
+        }
+        if other.max > self.max {
+            self.max = other.max;
+        }
+        self.sum += other.sum;
+        self.count += other.count;
+    }
 }
 
 #[derive(Default)]
