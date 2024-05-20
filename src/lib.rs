@@ -426,6 +426,7 @@ pub const STATION_NAMES: [&'static str; 413] = [
     "Zanzibar City",
     "Zürich",
 ];
+
 pub fn c_void<T>(value_ref: &T) -> *const ffi::c_void {
     (value_ref as *const T) as *const ffi::c_void
 }
@@ -441,6 +442,7 @@ fn round_to_positive(x: f32) -> f32 {
     }
 }
 
+#[derive(Copy, Clone)]
 pub struct Station {
     min: i32,
     max: i32,
@@ -449,6 +451,26 @@ pub struct Station {
 }
 
 impl Station {
+    pub fn new() -> Self {
+        Self {
+            min: i32::MAX,
+            max: i32::MIN,
+            sum: 0,
+            count: 0,
+        }
+    }
+
+    pub fn update(&mut self, temp: i32) {
+        if temp < self.min {
+            self.min = temp;
+        }
+        if temp > self.max {
+            self.max = temp;
+        }
+        self.sum += temp;
+        self.count += 1;
+    }
+
     pub fn merge(&mut self, other: &Station) {
         if other.min < self.min {
             self.min = other.min;

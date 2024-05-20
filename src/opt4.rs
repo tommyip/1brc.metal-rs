@@ -4,7 +4,10 @@ use std::{
     fs::File,
     hash::{BuildHasher, Hasher},
     ops::BitXor,
-    sync::{atomic::AtomicUsize, Mutex},
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Mutex,
+    },
     thread,
     time::Instant,
 };
@@ -20,13 +23,13 @@ use crate::{
 type StationsHashMap<'a> = HashMap<&'a str, Station, BuildFxHash>;
 
 const GPU_OFFLOAD_RATIO: f32 = 0.5;
-const CHUNK_LEN: u64 = {
+const GPU_CHUNK_LEN: u64 = {
     let len = 2 * 1024;
     assert!(len % 16 == 0);
     len
 };
+const CPU_CHUNK_LEN: usize = 16 * 1024;
 const HASHMAP_LEN: usize = 512;
-const HASHMAP_RAW_LEN: usize = HASHMAP_LEN * 4;
 
 /// Slightly modified FxHash (from Rustc & Firefox)
 ///
@@ -43,9 +46,9 @@ impl FxHash {
         self.hash = self.hash.rotate_left(5).bitxor(x).wrapping_mul(Self::K);
     }
 
-    fn hash(s: &str) -> u64 {
+    fn hash(s: &[u8]) -> u64 {
         let mut h = FxHash { hash: 0 };
-        h.write(s.as_bytes());
+        h.write(s);
         h.finish()
     }
 }
@@ -80,38 +83,47 @@ impl BuildHasher for BuildFxHash {
 }
 
 struct MPHStations<'a> {
-    buckets: [i32; HASHMAP_RAW_LEN],
+    buckets: [Station; HASHMAP_LEN],
     fallback: StationsHashMap<'a>,
+    params: &'a MPHParams,
 }
 
 impl<'a> MPHStations<'a> {
-    fn new() -> Self {
+    fn new(params: &'a MPHParams) -> Self {
         Self {
-            buckets: std::array::from_fn(|i| match i % 4 {
-                0 => i32::MAX,
-                1 => i32::MIN,
-                _ => 0,
-            }),
+            buckets: [Station::new(); HASHMAP_LEN],
             fallback: StationsHashMap::with_hasher(BuildFxHash),
+            params,
+        }
+    }
+
+    fn update(&mut self, name: &'a str, temp: i32) {
+        let idx = MPHParams::index(name);
+        let bucket_name = STATION_NAMES[self.params.inverted_indices[idx]];
+        if name == bucket_name {
+            self.buckets[idx].update(temp);
+        } else {
+            if let Some(station) = self.fallback.get_mut(name) {
+                station.update(temp);
+            } else {
+                self.fallback.insert(
+                    name,
+                    Station {
+                        min: temp,
+                        max: temp,
+                        sum: temp,
+                        count: 1,
+                    },
+                );
+            }
         }
     }
 
     fn merge(&mut self, other: MPHStations<'a>) {
-        for (bucket, other_bucket) in self
-            .buckets
-            .chunks_exact_mut(4)
-            .zip(other.buckets.chunks_exact(4))
-        {
-            if other_bucket[0] < bucket[0] {
-                bucket[0] = other_bucket[0];
-            }
-            if other_bucket[1] > bucket[1] {
-                bucket[1] = other_bucket[1];
-            }
-            bucket[2] += other_bucket[2];
-            bucket[3] += other_bucket[3];
+        for (bucket, other_bucket) in self.buckets.iter_mut().zip(other.buckets) {
+            bucket.merge(&other_bucket);
         }
-        for (name, other_station) in other.fallback.into_iter() {
+        for (name, other_station) in other.fallback {
             if let Some(station) = self.fallback.get_mut(name) {
                 station.merge(&other_station);
             } else {
@@ -120,28 +132,13 @@ impl<'a> MPHStations<'a> {
         }
     }
 
-    fn to_stations(mut self, params: &MPHParams) -> Stations<'a> {
+    fn to_stations(mut self) -> Stations<'a> {
         for (i, name) in STATION_NAMES.into_iter().enumerate() {
-            let offset = params.indices[i] * 4;
-            let min = self.buckets[offset];
-            let max = self.buckets[offset + 1];
-            let sum = self.buckets[offset + 2];
-            let count = self.buckets[offset + 3];
+            let bucket_station = self.buckets[self.params.indices[i]];
             if let Some(station) = self.fallback.get_mut(name) {
-                station.min = station.min.min(min);
-                station.max = station.max.max(max);
-                station.sum += sum;
-                station.count += count;
+                station.merge(&bucket_station);
             } else {
-                self.fallback.insert(
-                    name,
-                    Station {
-                        min,
-                        max,
-                        sum,
-                        count,
-                    },
-                );
+                self.fallback.insert(name, bucket_station);
             }
         }
         Stations {
@@ -156,6 +153,7 @@ struct MPHParams {
     keys: [u8; HASHMAP_LEN * 32],
     /// Map station names to keys index
     indices: [usize; STATION_NAMES.len()],
+    inverted_indices: [usize; HASHMAP_LEN],
 }
 
 impl MPHParams {
@@ -163,10 +161,12 @@ impl MPHParams {
         let mut this = MPHParams {
             keys: [0; HASHMAP_LEN * 32],
             indices: [0; STATION_NAMES.len()],
+            inverted_indices: [0; HASHMAP_LEN],
         };
         for (i, name) in STATION_NAMES.iter().enumerate() {
             let idx = Self::index(name);
             this.indices[i] = idx;
+            this.inverted_indices[idx] = i;
             this.keys[idx * 32..idx * 32 + name.len()].copy_from_slice(name.as_bytes());
         }
         this
@@ -188,7 +188,7 @@ impl MPHParams {
         const C3: isize = -55;
         const P1: u64 = 11068046444225730560;
 
-        let hash = FxHash::hash(name);
+        let hash = FxHash::hash(name.as_bytes());
         let is_large = hash >= P1;
         let rem = if is_large { REM_C2 } else { REM_C1 };
         let bucket = (is_large as isize * C3) + ((hash as u128 * rem as u128) >> 64) as isize;
@@ -302,7 +302,7 @@ fn chop_head_and_tail<'a, const CHUNK_LEN: usize>(buf: &'a [u8]) -> ChopInfo<'a>
     }
 }
 
-fn process_gpu<'a, F>(buf: &'a [u8], mph_params: &MPHParams, kernel_getter: F) -> MPHStations<'a>
+fn process_gpu<'a, F>(buf: &'a [u8], mph_params: &'a MPHParams, kernel_getter: F) -> MPHStations<'a>
 where
     F: FnOnce(&metal::Device) -> metal::Function,
 {
@@ -310,10 +310,10 @@ where
     let split_bufs = split_buf(&buf, u32::MAX as usize);
     let chop_infos = split_bufs
         .iter()
-        .map(|buf| chop_head_and_tail::<{ CHUNK_LEN as usize }>(buf))
+        .map(|buf| chop_head_and_tail::<{ GPU_CHUNK_LEN as usize }>(buf))
         .collect::<Vec<_>>();
 
-    let mut stations = MPHStations::new();
+    let mut stations = MPHStations::new(mph_params);
 
     let fallback = [false];
 
@@ -356,7 +356,7 @@ where
             encoder.set_buffer(0, Some(&device_split_buf), body_offset);
             encoder.set_buffer(1, Some(&device_mph_keys), 0);
             encoder.set_buffer(2, Some(&device_buckets), 0);
-            encoder.set_bytes(3, U32_SIZE, c_void(&(CHUNK_LEN as u32)));
+            encoder.set_bytes(3, U32_SIZE, c_void(&(GPU_CHUNK_LEN as u32)));
             encoder.set_buffer(4, Some(&device_fallback), 0);
 
             encoder.dispatch_threads(threads_per_grid, threads_per_threadgroup);
@@ -384,14 +384,55 @@ where
     stations
 }
 
-fn process_cpu<'a>(buf: &'a [u8], mph_params: &MPHParams, offset: &AtomicUsize) -> MPHStations<'a> {
-    let mut stations = MPHStations::new();
+fn process_cpu<'a>(
+    buf: &'a [u8],
+    mph_params: &'a MPHParams,
+    offset: &AtomicUsize,
+) -> MPHStations<'a> {
+    let mut stations = MPHStations::new(mph_params);
     let start = Instant::now();
-    cpu_impl(buf, &mut stations.fallback);
+
+    loop {
+        let chunk_offset = offset.fetch_add(CPU_CHUNK_LEN, Ordering::Relaxed);
+        if chunk_offset > buf.len() {
+            break;
+        }
+        let mut i = if chunk_offset == 0 {
+            0
+        } else {
+            chunk_offset + buf[chunk_offset..].iter().position(is_newline).unwrap() + 1
+        };
+        let end = (chunk_offset + CPU_CHUNK_LEN).min(buf.len().saturating_sub(1));
+        while i <= end {
+            let semi_idx = buf[i..].iter().position(|&c| c == b';').unwrap();
+            let name = unsafe { std::str::from_utf8_unchecked(&buf[i..i + semi_idx]) };
+            i += semi_idx + 1;
+            let newline_idx = buf[i..].iter().position(is_newline).unwrap();
+            let mut temp = &buf[i..i + newline_idx];
+            i += newline_idx + 1;
+
+            let sign = if temp[0] == b'-' {
+                temp = &temp[1..];
+                -1
+            } else {
+                1
+            };
+            let temp = sign
+                * match temp {
+                    [b, b'.', c] => 10 * (b - b'0') as i32 + (c - b'0') as i32,
+                    [a, b, b'.', c] => {
+                        100 * (a - b'0') as i32 + 10 * (b - b'0') as i32 + (c - b'0') as i32
+                    }
+                    _ => unreachable!(),
+                };
+
+            stations.update(name, temp);
+        }
+    }
+
     eprintln!(
-        "process_cpu elapsed={:.2}ms buf={}",
+        "process_cpu elapsed={:.2}ms",
         start.elapsed().as_secs_f64() * 1000.,
-        buf.len()
     );
     stations
 }
@@ -404,28 +445,23 @@ where
     let (gpu_buf, cpu_buf) = split_buf_once(buf, (buf.len() as f32 * GPU_OFFLOAD_RATIO) as usize);
 
     let n_cpus = thread::available_parallelism().unwrap().get() - 1;
-    let cpu_chunk_size = cpu_buf.len().div_ceil(n_cpus);
-    let cpu_chunks = split_buf(cpu_buf, cpu_chunk_size);
     let cpu_buf_offset = AtomicUsize::new(0);
 
-    let stations = Mutex::new(MPHStations::new());
     let mph_params = MPHParams::init();
+    let stations = Mutex::new(MPHStations::new(&mph_params));
 
     thread::scope(|s| {
         s.spawn(|| {
             let local = process_gpu(gpu_buf, &mph_params, kernel_getter);
             stations.lock().unwrap().merge(local);
         });
-        for chunk in cpu_chunks {
+        for _ in 0..n_cpus {
             s.spawn(|| {
-                let local = process_cpu(chunk, &mph_params, &cpu_buf_offset);
+                let local = process_cpu(cpu_buf, &mph_params, &cpu_buf_offset);
                 stations.lock().unwrap().merge(local);
             });
         }
     });
 
-    println!(
-        "{}",
-        stations.into_inner().unwrap().to_stations(&mph_params)
-    );
+    println!("{}", stations.into_inner().unwrap().to_stations());
 }
