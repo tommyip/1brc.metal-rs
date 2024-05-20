@@ -199,7 +199,8 @@ impl MPHParams {
     }
 }
 
-fn cpu_impl<'a>(buf: &'a [u8], stations: &mut StationsHashMap<'a>) {
+/// Minimal CPU implementation without any bells or whistle
+fn process_cpu_naive<'a>(buf: &'a [u8], stations: &mut StationsHashMap<'a>) {
     buf[..buf.len().saturating_sub(1)]
         .split(is_newline)
         .filter(|line| !line.is_empty())
@@ -217,10 +218,7 @@ fn cpu_impl<'a>(buf: &'a [u8], stations: &mut StationsHashMap<'a>) {
             }
             temp *= sign;
             if let Some(station) = stations.get_mut(name) {
-                station.min = station.min.min(temp);
-                station.max = station.max.max(temp);
-                station.sum += temp;
-                station.count += 1;
+                station.update(temp);
             } else {
                 stations.insert(
                     name,
@@ -262,7 +260,7 @@ fn split_buf(mut buf: &[u8], max_len: usize) -> Vec<&[u8]> {
 
 struct ChopInfo<'a> {
     /// 16-byte aligned offset of GPU chunk
-    body_offset: u64,
+    body_offset: usize,
     /// Contain complete lines
     head: &'a [u8],
     /// Contain complete lines
@@ -284,7 +282,7 @@ fn chop_head_and_tail<'a, const CHUNK_LEN: usize>(buf: &'a [u8]) -> ChopInfo<'a>
         (prefix, middle)
     };
     let body_offset = prefix.len();
-    let head_offset = middle.iter().position(is_newline).unwrap() + 1;
+    let head_offset = body_offset + middle.iter().position(is_newline).unwrap() + 1;
     let n_threads = (buf.len() - 16 - body_offset) / CHUNK_LEN;
     let unaligned_tail_offset = body_offset + n_threads * CHUNK_LEN;
     let tail_offset = unaligned_tail_offset
@@ -296,7 +294,7 @@ fn chop_head_and_tail<'a, const CHUNK_LEN: usize>(buf: &'a [u8]) -> ChopInfo<'a>
 
     ChopInfo {
         head: &buf[..head_offset],
-        body_offset: body_offset as u64,
+        body_offset,
         tail: &buf[tail_offset..],
         n_threads: n_threads as u64,
     }
@@ -353,7 +351,7 @@ where
 
             let encoder = cmd_buf.new_compute_command_encoder();
             encoder.set_compute_pipeline_state(&pipeline_state);
-            encoder.set_buffer(0, Some(&device_split_buf), body_offset);
+            encoder.set_buffer(0, Some(&device_split_buf), body_offset as u64);
             encoder.set_buffer(1, Some(&device_mph_keys), 0);
             encoder.set_buffer(2, Some(&device_buckets), 0);
             encoder.set_bytes(3, U32_SIZE, c_void(&(GPU_CHUNK_LEN as u32)));
@@ -366,8 +364,8 @@ where
         cmd_buf.commit();
 
         for ChopInfo { head, tail, .. } in chop_infos {
-            cpu_impl(head, &mut stations.fallback);
-            cpu_impl(tail, &mut stations.fallback);
+            process_cpu_naive(head, &mut stations.fallback);
+            process_cpu_naive(tail, &mut stations.fallback);
         }
 
         cmd_buf.wait_until_completed();
@@ -388,22 +386,19 @@ fn process_cpu<'a>(
     buf: &'a [u8],
     mph_params: &'a MPHParams,
     offset: &AtomicUsize,
+    end: usize,
 ) -> MPHStations<'a> {
     let mut stations = MPHStations::new(mph_params);
     let start = Instant::now();
 
     loop {
         let chunk_offset = offset.fetch_add(CPU_CHUNK_LEN, Ordering::Relaxed);
-        if chunk_offset > buf.len() {
+        if chunk_offset >= end {
             break;
         }
-        let mut i = if chunk_offset == 0 {
-            0
-        } else {
-            chunk_offset + buf[chunk_offset..].iter().position(is_newline).unwrap() + 1
-        };
-        let end = (chunk_offset + CPU_CHUNK_LEN).min(buf.len().saturating_sub(1));
-        while i <= end {
+        let mut i = chunk_offset + buf[chunk_offset..].iter().position(is_newline).unwrap() + 1;
+        let chunk_end = (chunk_offset + CPU_CHUNK_LEN + 1).min(end);
+        while i < chunk_end {
             let semi_idx = buf[i..].iter().position(|&c| c == b';').unwrap();
             let name = unsafe { std::str::from_utf8_unchecked(&buf[i..i + semi_idx]) };
             i += semi_idx + 1;
@@ -434,6 +429,7 @@ fn process_cpu<'a>(
         "process_cpu elapsed={:.2}ms",
         start.elapsed().as_secs_f64() * 1000.,
     );
+    assert!(stations.fallback.is_empty());
     stations
 }
 
@@ -441,14 +437,28 @@ pub fn process<'a, F: Send>(file: &'a File, kernel_getter: F)
 where
     F: FnOnce(&metal::Device) -> metal::Function,
 {
+    let mph_params = MPHParams::init();
+    let mut stations = MPHStations::new(&mph_params);
+
     let buf = unsafe { &Mmap::map(file).unwrap() };
     let (gpu_buf, cpu_buf) = split_buf_once(buf, (buf.len() as f32 * GPU_OFFLOAD_RATIO) as usize);
 
+    let (cpu_buf, cpu_buf_offset, cpu_buf_end) = {
+        let ChopInfo {
+            body_offset,
+            head,
+            tail,
+            ..
+        } = chop_head_and_tail::<1>(cpu_buf);
+        process_cpu_naive(head, &mut stations.fallback);
+        process_cpu_naive(tail, &mut stations.fallback);
+        let cpu_buf_offset = AtomicUsize::new(body_offset);
+        let cpu_buf_end = cpu_buf.len() - body_offset - tail.len();
+        (&cpu_buf[body_offset..], cpu_buf_offset, cpu_buf_end)
+    };
     let n_cpus = thread::available_parallelism().unwrap().get() - 1;
-    let cpu_buf_offset = AtomicUsize::new(0);
 
-    let mph_params = MPHParams::init();
-    let stations = Mutex::new(MPHStations::new(&mph_params));
+    let stations = Mutex::new(stations);
 
     thread::scope(|s| {
         s.spawn(|| {
@@ -457,7 +467,7 @@ where
         });
         for _ in 0..n_cpus {
             s.spawn(|| {
-                let local = process_cpu(cpu_buf, &mph_params, &cpu_buf_offset);
+                let local = process_cpu(cpu_buf, &mph_params, &cpu_buf_offset, cpu_buf_end);
                 stations.lock().unwrap().merge(local);
             });
         }
