@@ -8,5 +8,6 @@
 *.metallibsym
 # Metal frame capture
 *.gputrace
+*.trace
 # Flamegraph
 *.svg
