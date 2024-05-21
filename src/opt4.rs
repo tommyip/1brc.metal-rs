@@ -23,7 +23,7 @@ use crate::{
 
 type StationsHashMap<'a> = HashMap<&'a [u8], Station, BuildFxHash>;
 
-const GPU_OFFLOAD_RATIO: f32 = 0.5;
+const GPU_OFFLOAD_RATIO: f32 = 0.75;
 const GPU_CHUNK_LEN: u64 = {
     let len = 2 * 1024;
     assert!(len % 16 == 0);
@@ -363,10 +363,11 @@ where
 
     assert!(!fallback[0], "Need fallback");
 
+    let elapsed = start.elapsed().as_secs_f32();
     eprintln!(
-        "process_gpu elapsed={:.2}ms buf={}MB",
-        start.elapsed().as_secs_f64() * 1000.,
-        buf.len() / (1024 * 1024)
+        "process_gpu elapsed={:.2}ms throughput={:.3}GB/s",
+        elapsed * 1000.,
+        (buf.len() as f32 / (1024 * 1024 * 1024) as f32) / elapsed
     );
 
     stations
@@ -380,6 +381,7 @@ fn process_cpu<'a>(
 ) -> MPHStations<'a> {
     let mut stations = MPHStations::new(mph_params);
     let start = Instant::now();
+    let mut total_bytes = 0;
 
     loop {
         let mut i = offset.fetch_add(CPU_CHUNK_LEN, Ordering::Relaxed);
@@ -387,6 +389,7 @@ fn process_cpu<'a>(
             break;
         }
         let chunk_end = (i + CPU_CHUNK_LEN + 1).min(end);
+        total_bytes += CPU_CHUNK_LEN;
 
         let mut newline_bytes = u8x16::from_slice(&buf[i..]);
         loop {
@@ -425,9 +428,11 @@ fn process_cpu<'a>(
         }
     }
 
+    let elapsed = start.elapsed().as_secs_f32();
     eprintln!(
-        "process_cpu elapsed={:.2}ms",
-        start.elapsed().as_secs_f64() * 1000.,
+        "process_cpu elapsed={:.2}ms throughput={:.3}GB/s",
+        elapsed * 1000.,
+        (total_bytes as f32 / (1024 * 1024 * 1024) as f32) / elapsed
     );
     assert!(stations.fallback.is_empty());
     stations
