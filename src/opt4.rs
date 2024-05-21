@@ -4,7 +4,7 @@ use std::{
     fs::File,
     hash::{BuildHasher, Hasher},
     ops::BitXor,
-    simd::{cmp::SimdPartialEq, mask8x32, u64x4, u8x16, u8x32},
+    simd::{cmp::SimdPartialEq, u64x4, u8x16, u8x32},
     sync::{
         atomic::{AtomicUsize, Ordering},
         Mutex,
@@ -407,8 +407,7 @@ fn process_cpu<'a>(
             let semi_mask = name_prefix.simd_eq(u8x32::splat(b';'));
             let station = if let Some(semi_idx) = semi_mask.first_set() {
                 i += semi_idx + 1;
-                let name_mask = mask8x32::from_bitmask(!(u64::MAX << semi_idx));
-                name_prefix = name_mask.select(name_prefix, u8x32::splat(0));
+                name_prefix = u8x32::load_or_default(&name_prefix.as_array()[..semi_idx]);
                 let mph_idx = MPHParams::index(name_prefix, semi_idx);
                 if name_prefix == mph_params.keys[mph_idx] {
                     &mut stations.buckets[mph_idx]
