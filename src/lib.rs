@@ -1,3 +1,5 @@
+#![feature(portable_simd)]
+
 pub mod gpu_baseline;
 pub mod opt2;
 pub mod opt3;
@@ -450,13 +452,24 @@ pub struct Station {
     count: i32,
 }
 
-impl Station {
-    pub fn new() -> Self {
+impl Default for Station {
+    fn default() -> Self {
         Self {
             min: i32::MAX,
             max: i32::MIN,
             sum: 0,
             count: 0,
+        }
+    }
+}
+
+impl Station {
+    pub fn new(temp: i32) -> Self {
+        Self {
+            min: temp,
+            max: temp,
+            sum: temp,
+            count: 1,
         }
     }
 

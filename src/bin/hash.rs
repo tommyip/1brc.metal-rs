@@ -1,9 +1,15 @@
 #![allow(dead_code)]
+#![feature(portable_simd)]
 
-use std::{collections::HashSet, fmt, ops::BitXor};
+use std::{
+    collections::HashSet,
+    fmt,
+    ops::BitXor,
+    simd::{u64x4, u8x32},
+};
 
 use one_billion_row::STATION_NAMES;
-use ptr_hash::{hash::Hasher, DefaultPtrHash, PtrHash, PtrHashParams};
+use ptr_hash::hash::Hasher;
 
 fn name_len_stats() {
     let n_gt_8 = STATION_NAMES.iter().filter(|name| name.len() > 8).count();
@@ -162,16 +168,18 @@ fn ptrhash(hash: u64) -> usize {
 }
 
 fn main() {
-    let params = PtrHashParams {
-        alpha: 0.9,
-        c: 1.5,
-        slots_per_part: STATION_NAMES.len() * 2,
-        ..Default::default()
-    };
-    let mphf: PtrHash<&str, ptr_hash::local_ef::LocalEf, FxHash> =
-        DefaultPtrHash::new(&STATION_NAMES, params);
+    println!("align_of<u64x4> {}", std::mem::align_of::<u64x4>());
+    println!("align_of<u8x32> {}", std::mem::align_of::<u8x32>());
+    // let params = PtrHashParams {
+    //     alpha: 0.9,
+    //     c: 1.5,
+    //     slots_per_part: STATION_NAMES.len() * 2,
+    //     ..Default::default()
+    // };
+    // let mphf: PtrHash<&str, ptr_hash::local_ef::LocalEf, FxHash> =
+    //     DefaultPtrHash::new(&STATION_NAMES, params);
 
-    println!("{}", mphf.index(&"Hong Kong"));
+    // println!("{}", mphf.index(&"Hong Kong"));
     // ptrhash(FxHash::hash(&"Hong Kong", 0));
 
     // let mut taken = vec![false; 512];
@@ -183,10 +191,10 @@ fn main() {
     //     taken[ref_idx] = true;
     // }
 
-    println!(
-        "{}",
-        STATION_NAMES.map(|x| x.len()).into_iter().max().unwrap()
-    );
+    // println!(
+    //     "{}",
+    //     STATION_NAMES.map(|x| x.len()).into_iter().max().unwrap()
+    // );
 
     // let global_len = 10_000;
     // let threadgroup_len = 1_365;

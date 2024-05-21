@@ -4,6 +4,7 @@ use std::{
     fs::File,
     hash::{BuildHasher, Hasher},
     ops::BitXor,
+    simd::{cmp::SimdPartialEq, mask8x32, u64x4, u8x16, u8x32},
     sync::{
         atomic::{AtomicUsize, Ordering},
         Mutex,
@@ -20,7 +21,7 @@ use crate::{
     U32_SIZE,
 };
 
-type StationsHashMap<'a> = HashMap<&'a str, Station, BuildFxHash>;
+type StationsHashMap<'a> = HashMap<&'a [u8], Station, BuildFxHash>;
 
 const GPU_OFFLOAD_RATIO: f32 = 0.5;
 const GPU_CHUNK_LEN: u64 = {
@@ -31,10 +32,21 @@ const GPU_CHUNK_LEN: u64 = {
 const CPU_CHUNK_LEN: usize = 16 * 1024;
 const HASHMAP_LEN: usize = 512;
 
+fn swar_parse_temp(temp: i64, dot_pos: usize) -> i32 {
+    const MAGIC_MUL: i64 = 100 * 0x1000000 + 10 * 0x10000 + 1;
+    let shift = 28 - dot_pos;
+    let sign = (!temp << 59) >> 63;
+    let minus_filter = !(sign & 0xFF);
+    let digits = ((temp & minus_filter) << shift) & 0x0F000F0F00;
+    let abs_value = (digits.wrapping_mul(MAGIC_MUL) as u64 >> 32) & 0x3FF;
+    ((abs_value as i64 ^ sign) - sign) as i32
+}
+
 /// Slightly modified FxHash (from Rustc & Firefox)
 ///
 /// Does not break down trailing bytes into 4, 2, 1 bytes
 /// chunks unlike the original implementation.
+#[derive(Default)]
 struct FxHash {
     hash: u64,
 }
@@ -46,9 +58,13 @@ impl FxHash {
         self.hash = self.hash.rotate_left(5).bitxor(x).wrapping_mul(Self::K);
     }
 
-    fn hash(s: &[u8]) -> u64 {
-        let mut h = FxHash { hash: 0 };
-        h.write(s);
+    #[inline]
+    fn hash(s: u8x32, len: usize) -> u64 {
+        let mut h = FxHash::default();
+        let chunks: u64x4 = unsafe { std::mem::transmute(s) };
+        for bytes in chunks.to_array().into_iter().take(len.div_ceil(8)) {
+            h.hash64(bytes);
+        }
         h.finish()
     }
 }
@@ -91,31 +107,9 @@ struct MPHStations<'a> {
 impl<'a> MPHStations<'a> {
     fn new(params: &'a MPHParams) -> Self {
         Self {
-            buckets: [Station::new(); HASHMAP_LEN],
+            buckets: [Station::default(); HASHMAP_LEN],
             fallback: StationsHashMap::with_hasher(BuildFxHash),
             params,
-        }
-    }
-
-    fn update(&mut self, name: &'a str, temp: i32) {
-        let idx = MPHParams::index(name);
-        let bucket_name = STATION_NAMES[self.params.inverted_indices[idx]];
-        if name == bucket_name {
-            self.buckets[idx].update(temp);
-        } else {
-            if let Some(station) = self.fallback.get_mut(name) {
-                station.update(temp);
-            } else {
-                self.fallback.insert(
-                    name,
-                    Station {
-                        min: temp,
-                        max: temp,
-                        sum: temp,
-                        count: 1,
-                    },
-                );
-            }
         }
     }
 
@@ -124,50 +118,49 @@ impl<'a> MPHStations<'a> {
             bucket.merge(&other_bucket);
         }
         for (name, other_station) in other.fallback {
-            if let Some(station) = self.fallback.get_mut(name) {
-                station.merge(&other_station);
-            } else {
-                self.fallback.insert(name, other_station);
-            }
+            self.fallback
+                .entry(name)
+                .and_modify(|station| station.merge(&other_station))
+                .or_insert(other_station);
         }
     }
 
     fn to_stations(mut self) -> Stations<'a> {
         for (i, name) in STATION_NAMES.into_iter().enumerate() {
             let bucket_station = self.buckets[self.params.indices[i]];
-            if let Some(station) = self.fallback.get_mut(name) {
-                station.merge(&bucket_station);
-            } else {
-                self.fallback.insert(name, bucket_station);
-            }
+            self.fallback
+                .entry(name.as_bytes())
+                .and_modify(|station| station.merge(&bucket_station))
+                .or_insert(bucket_station);
         }
         Stations {
-            inner: self.fallback.into_iter().collect(),
+            inner: self
+                .fallback
+                .into_iter()
+                .map(|(k, v)| (unsafe { std::str::from_utf8_unchecked(k) }, v))
+                .collect(),
         }
     }
 }
 
-#[repr(align(32))]
 struct MPHParams {
     /// 32-byte aligned station names sorted using the perfect minimal hash index
-    keys: [u8; HASHMAP_LEN * 32],
+    keys: [u8x32; HASHMAP_LEN],
     /// Map station names to keys index
     indices: [usize; STATION_NAMES.len()],
-    inverted_indices: [usize; HASHMAP_LEN],
 }
 
 impl MPHParams {
     fn init() -> Self {
         let mut this = MPHParams {
-            keys: [0; HASHMAP_LEN * 32],
+            keys: [u8x32::splat(0); HASHMAP_LEN],
             indices: [0; STATION_NAMES.len()],
-            inverted_indices: [0; HASHMAP_LEN],
         };
         for (i, name) in STATION_NAMES.iter().enumerate() {
-            let idx = Self::index(name);
+            let name_simd = u8x32::load_or_default(name.as_bytes());
+            let idx = Self::index(name_simd, name.len());
             this.indices[i] = idx;
-            this.inverted_indices[idx] = i;
-            this.keys[idx * 32..idx * 32 + name.len()].copy_from_slice(name.as_bytes());
+            this.keys[idx] = name_simd;
         }
         this
     }
@@ -176,7 +169,8 @@ impl MPHParams {
     ///
     /// Constructed with PTRHash (https://github.com/RagnarGrootKoerkamp/PTRHash)
     /// Map all 314 station names uniquely to 512 buckets
-    fn index(name: &str) -> usize {
+    #[inline]
+    fn index(name: u8x32, len: usize) -> usize {
         const PILOTS: [u8; 78] = [
             50, 110, 71, 13, 18, 27, 21, 14, 10, 16, 1, 14, 6, 11, 0, 2, 17, 2, 1, 4, 68, 79, 21,
             0, 22, 20, 60, 12, 30, 53, 62, 78, 27, 17, 2, 17, 13, 43, 21, 108, 19, 12, 25, 1, 55,
@@ -188,7 +182,7 @@ impl MPHParams {
         const C3: isize = -55;
         const P1: u64 = 11068046444225730560;
 
-        let hash = FxHash::hash(name.as_bytes());
+        let hash = FxHash::hash(name, len);
         let is_large = hash >= P1;
         let rem = if is_large { REM_C2 } else { REM_C1 };
         let bucket = (is_large as isize * C3) + ((hash as u128 * rem as u128) >> 64) as isize;
@@ -206,30 +200,24 @@ fn process_cpu_naive<'a>(buf: &'a [u8], stations: &mut StationsHashMap<'a>) {
         .filter(|line| !line.is_empty())
         .for_each(|line| {
             let name_len = line.iter().position(|&c| c == b';').unwrap();
-            let name = unsafe { std::str::from_utf8_unchecked(&line[..name_len]) };
-            let mut sign = 1;
-            let mut temp = 0;
-            for &c in &line[name_len + 1..] {
-                if c == b'-' {
-                    sign = -1;
-                } else if c.is_ascii_digit() {
-                    temp = temp * 10 + (c - b'0') as i32;
-                }
-            }
-            temp *= sign;
-            if let Some(station) = stations.get_mut(name) {
-                station.update(temp);
+            let (name, rest) = line.split_at(name_len);
+            let (sign, temp) = if rest[1] == b'-' {
+                (-1, &rest[2..])
             } else {
-                stations.insert(
-                    name,
-                    Station {
-                        min: temp,
-                        max: temp,
-                        sum: temp,
-                        count: 1,
-                    },
-                );
-            }
+                (1, &rest[1..])
+            };
+            let temp = sign
+                * match temp {
+                    [b, b'.', c] => 10 * (b - b'0') as i32 + (c - b'0') as i32,
+                    [a, b, b'.', c] => {
+                        100 * (a - b'0') as i32 + 10 * (b - b'0') as i32 + (c - b'0') as i32
+                    }
+                    _ => unreachable!(),
+                };
+            stations
+                .entry(name)
+                .and_modify(|station| station.update(temp))
+                .or_insert(Station::new(temp));
         });
 }
 
@@ -272,7 +260,9 @@ struct ChopInfo<'a> {
 /// Chop off the head and tail lines of the GPU buffer. Chopping off the head is needed
 /// for aligning our buffer to 16 bytes multiplies. Chopping off the tail allow us
 /// to read 16 bytes at a time without going out of bounds at the end.
-fn chop_head_and_tail<'a, const CHUNK_LEN: usize>(buf: &'a [u8]) -> ChopInfo<'a> {
+fn chop_head_and_tail<'a, const CHUNK_LEN: usize, const EXCESS: usize>(
+    buf: &'a [u8],
+) -> ChopInfo<'a> {
     let (prefix, middle) = unsafe {
         let (prefix, middle, _) = buf.align_to::<u128>();
         let middle = slice::from_raw_parts(
@@ -283,7 +273,7 @@ fn chop_head_and_tail<'a, const CHUNK_LEN: usize>(buf: &'a [u8]) -> ChopInfo<'a>
     };
     let body_offset = prefix.len();
     let head_offset = body_offset + middle.iter().position(is_newline).unwrap() + 1;
-    let n_threads = (buf.len() - 16 - body_offset) / CHUNK_LEN;
+    let n_threads = (buf.len() - EXCESS - body_offset) / CHUNK_LEN;
     let unaligned_tail_offset = body_offset + n_threads * CHUNK_LEN;
     let tail_offset = unaligned_tail_offset
         + buf[unaligned_tail_offset..]
@@ -308,7 +298,7 @@ where
     let split_bufs = split_buf(&buf, u32::MAX as usize);
     let chop_infos = split_bufs
         .iter()
-        .map(|buf| chop_head_and_tail::<{ GPU_CHUNK_LEN as usize }>(buf))
+        .map(|buf| chop_head_and_tail::<{ GPU_CHUNK_LEN as usize }, 16>(buf))
         .collect::<Vec<_>>();
 
     let mut stations = MPHStations::new(mph_params);
@@ -392,36 +382,46 @@ fn process_cpu<'a>(
     let start = Instant::now();
 
     loop {
-        let chunk_offset = offset.fetch_add(CPU_CHUNK_LEN, Ordering::Relaxed);
-        if chunk_offset >= end {
+        let mut i = offset.fetch_add(CPU_CHUNK_LEN, Ordering::Relaxed);
+        if i >= end {
             break;
         }
-        let mut i = chunk_offset + buf[chunk_offset..].iter().position(is_newline).unwrap() + 1;
-        let chunk_end = (chunk_offset + CPU_CHUNK_LEN + 1).min(end);
+        let chunk_end = (i + CPU_CHUNK_LEN + 1).min(end);
+
+        let mut newline_bytes = u8x16::from_slice(&buf[i..]);
+        loop {
+            let newline_mask = newline_bytes.simd_eq(u8x16::splat(b'\n'));
+            if newline_mask.any() {
+                i += (newline_mask.to_bitmask().trailing_zeros() + 1) as usize;
+                break;
+            }
+            i += u8x16::LEN;
+            newline_bytes = u8x16::from_slice(&buf[i..]);
+        }
+
         while i < chunk_end {
-            let semi_idx = buf[i..].iter().position(|&c| c == b';').unwrap();
-            let name = unsafe { std::str::from_utf8_unchecked(&buf[i..i + semi_idx]) };
-            i += semi_idx + 1;
-            let newline_idx = buf[i..].iter().position(is_newline).unwrap();
-            let mut temp = &buf[i..i + newline_idx];
-            i += newline_idx + 1;
-
-            let sign = if temp[0] == b'-' {
-                temp = &temp[1..];
-                -1
+            let mut name_prefix = u8x32::from_slice(&buf[i..]);
+            let semi_mask = name_prefix.simd_eq(u8x32::splat(b';'));
+            let station = if let Some(semi_idx) = semi_mask.first_set() {
+                i += semi_idx + 1;
+                let name_mask = mask8x32::from_bitmask(!(u64::MAX << semi_idx));
+                name_prefix = name_mask.select(name_prefix, u8x32::splat(0));
+                let mph_idx = MPHParams::index(name_prefix, semi_idx);
+                if name_prefix == mph_params.keys[mph_idx] {
+                    &mut stations.buckets[mph_idx]
+                } else {
+                    unreachable!("fallback path");
+                }
             } else {
-                1
+                unreachable!("fallback path");
             };
-            let temp = sign
-                * match temp {
-                    [b, b'.', c] => 10 * (b - b'0') as i32 + (c - b'0') as i32,
-                    [a, b, b'.', c] => {
-                        100 * (a - b'0') as i32 + 10 * (b - b'0') as i32 + (c - b'0') as i32
-                    }
-                    _ => unreachable!(),
-                };
-
-            stations.update(name, temp);
+            let mut temp_buf = [0u8; 8];
+            temp_buf.copy_from_slice(&buf[i..i + 8]);
+            let temp_bytes = i64::from_le_bytes(temp_buf);
+            let dot_pos = (!temp_bytes & 0x10101000).trailing_zeros() as usize;
+            i += (dot_pos >> 3) + 3;
+            let temp = swar_parse_temp(temp_bytes, dot_pos);
+            station.update(temp);
         }
     }
 
@@ -442,6 +442,7 @@ where
 
     let buf = unsafe { &Mmap::map(file).unwrap() };
     let (gpu_buf, cpu_buf) = split_buf_once(buf, (buf.len() as f32 * GPU_OFFLOAD_RATIO) as usize);
+    // let cpu_buf = buf;
 
     let (cpu_buf, cpu_buf_offset, cpu_buf_end) = {
         let ChopInfo {
@@ -449,7 +450,7 @@ where
             head,
             tail,
             ..
-        } = chop_head_and_tail::<1>(cpu_buf);
+        } = chop_head_and_tail::<1, 32>(cpu_buf);
         process_cpu_naive(head, &mut stations.fallback);
         process_cpu_naive(tail, &mut stations.fallback);
         let cpu_buf_offset = AtomicUsize::new(body_offset);
@@ -457,6 +458,7 @@ where
         (&cpu_buf[body_offset..], cpu_buf_offset, cpu_buf_end)
     };
     let n_cpus = thread::available_parallelism().unwrap().get() - 1;
+    // let n_cpus = 1;
 
     let stations = Mutex::new(stations);
 
@@ -474,4 +476,45 @@ where
     });
 
     println!("{}", stations.into_inner().unwrap().to_stations());
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_hash_simd() {
+        const S: &str = "Hello, world!";
+
+        let expected = {
+            let mut ref_hasher = FxHash::default();
+            ref_hasher.write(S.as_bytes());
+            ref_hasher.finish()
+        };
+
+        let actual = {
+            let s_simd = u8x32::load_or_default(S.as_bytes());
+            FxHash::hash(s_simd, S.len())
+        };
+
+        assert_eq!(expected, actual);
+    }
+
+    #[test]
+    fn test_swar_parse_temp() {
+        fn parse(s: &str) -> i32 {
+            let mut buf = [0u8; 8];
+            buf[..s.len()].copy_from_slice(s.as_bytes());
+            let bytes = i64::from_le_bytes(buf);
+            let dot_pos = (!bytes & 0x10101000).trailing_zeros();
+            swar_parse_temp(bytes, dot_pos as usize)
+        }
+
+        assert_eq!(parse("0.0"), 0);
+        assert_eq!(parse("1.0"), 10);
+        assert_eq!(parse("1.2"), 12);
+        assert_eq!(parse("-1.2"), -12);
+        assert_eq!(parse("12.3"), 123);
+        assert_eq!(parse("-12.3"), -123);
+    }
 }
