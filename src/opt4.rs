@@ -1,6 +1,7 @@
 use core::slice;
 use std::{
     collections::HashMap,
+    env,
     fs::File,
     hash::{BuildHasher, Hasher},
     ops::BitXor,
@@ -23,7 +24,7 @@ use crate::{
 
 type StationsHashMap<'a> = HashMap<&'a [u8], Station, BuildFxHash>;
 
-const GPU_OFFLOAD_RATIO: f32 = 0.75;
+const GPU_OFFLOAD_RATIO: f32 = 0.5;
 const GPU_CHUNK_LEN: u64 = {
     let len = 2 * 1024;
     assert!(len % 16 == 0);
@@ -227,8 +228,12 @@ fn process_cpu_naive<'a>(buf: &'a [u8], stations: &mut StationsHashMap<'a>) {
 
 fn split_buf_once(buf: &[u8], max_len: usize) -> (&[u8], &[u8]) {
     if buf.len() > max_len {
-        let mid = buf[..max_len].iter().rposition(|&c| c == b'\n').unwrap() + 1;
-        (&buf[..mid], &buf[mid..])
+        let split = buf[..max_len]
+            .iter()
+            .rposition(|&c| c == b'\n')
+            .map(|i| i + 1)
+            .unwrap_or(0);
+        (&buf[..split], &buf[split..])
     } else {
         (buf, &[])
     }
@@ -276,15 +281,20 @@ fn chop_head_and_tail<'a, const CHUNK_LEN: usize, const EXCESS: usize>(
         (prefix, middle)
     };
     let body_offset = prefix.len();
-    let head_offset = body_offset + middle.iter().position(is_newline).unwrap() + 1;
-    let n_threads = (buf.len() - EXCESS - body_offset) / CHUNK_LEN;
+    let head_offset = body_offset
+        + middle
+            .iter()
+            .position(is_newline)
+            .map(|i| i + 1)
+            .unwrap_or(0);
+    let n_threads = buf.len().saturating_sub(EXCESS + body_offset) / CHUNK_LEN;
     let unaligned_tail_offset = body_offset + n_threads * CHUNK_LEN;
     let tail_offset = unaligned_tail_offset
         + buf[unaligned_tail_offset..]
             .iter()
             .position(is_newline)
-            .unwrap()
-        + 1;
+            .map(|i| i + 1)
+            .unwrap_or(0);
 
     ChopInfo {
         head: &buf[..head_offset],
@@ -471,12 +481,20 @@ pub fn process<'a, F: Send>(file: &'a File, kernel_getter: F)
 where
     F: FnOnce(&metal::Device) -> metal::Function,
 {
+    let gpu_offload_ratio = env::var("GPU_OFFLOAD_RATIO")
+        .ok()
+        .map(|x| x.parse().unwrap())
+        .unwrap_or(GPU_OFFLOAD_RATIO);
+    let n_cpus = env::var("N_CPUS")
+        .ok()
+        .map(|x| x.parse().unwrap())
+        .unwrap_or_else(|| thread::available_parallelism().unwrap().get());
+
     let mph_params = MPHParams::init();
     let mut stations = MPHStations::new(&mph_params);
 
     let buf = unsafe { &Mmap::map(file).unwrap() };
-    let (gpu_buf, cpu_buf) = split_buf_once(buf, (buf.len() as f32 * GPU_OFFLOAD_RATIO) as usize);
-    // let cpu_buf = buf;
+    let (gpu_buf, cpu_buf) = split_buf_once(buf, (buf.len() as f32 * gpu_offload_ratio) as usize);
 
     let (cpu_buf, cpu_buf_offset, cpu_buf_end) = {
         let ChopInfo {
@@ -491,21 +509,23 @@ where
         let cpu_buf_end = cpu_buf.len() - body_offset - tail.len();
         (&cpu_buf[body_offset..], cpu_buf_offset, cpu_buf_end)
     };
-    let n_cpus = thread::available_parallelism().unwrap().get() - 1;
-    // let n_cpus = 1;
 
     let stations = Mutex::new(stations);
 
     thread::scope(|s| {
-        s.spawn(|| {
-            let local = process_gpu(gpu_buf, &mph_params, kernel_getter);
-            stations.lock().unwrap().merge(local);
-        });
-        for _ in 0..n_cpus {
+        if !gpu_buf.is_empty() {
             s.spawn(|| {
-                let local = process_cpu(cpu_buf, &mph_params, &cpu_buf_offset, cpu_buf_end);
+                let local = process_gpu(gpu_buf, &mph_params, kernel_getter);
                 stations.lock().unwrap().merge(local);
             });
+        }
+        if !cpu_buf.is_empty() {
+            for _ in 0..n_cpus {
+                s.spawn(|| {
+                    let local = process_cpu(cpu_buf, &mph_params, &cpu_buf_offset, cpu_buf_end);
+                    stations.lock().unwrap().merge(local);
+                });
+            }
         }
     });
 
