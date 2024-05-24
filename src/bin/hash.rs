@@ -5,7 +5,7 @@ use std::{
     collections::HashSet,
     fmt,
     ops::BitXor,
-    simd::{u64x4, u8x32},
+    simd::{cmp::SimdPartialEq, u8x16},
 };
 
 use one_billion_row::STATION_NAMES;
@@ -13,7 +13,7 @@ use ptr_hash::hash::Hasher;
 
 fn name_len_stats() {
     let n_gt_8 = STATION_NAMES.iter().filter(|name| name.len() > 8).count();
-    let n_gt_11 = STATION_NAMES.iter().filter(|name| name.len() > 11).count();
+    let n_gt_15 = STATION_NAMES.iter().filter(|name| name.len() > 15).count();
     let n_gt_16 = STATION_NAMES.iter().filter(|name| name.len() > 16).count();
     let max_len = STATION_NAMES.iter().map(|name| name.len()).max().unwrap();
     let unicode_prefix = STATION_NAMES
@@ -21,8 +21,13 @@ fn name_len_stats() {
         .filter(|name| name.as_bytes()[0] >> 7 == 1)
         .collect::<Vec<_>>();
     println!(
-        ">8={} >11={} >16={} max={}",
-        n_gt_8, n_gt_11, n_gt_16, max_len,
+        "<=8={} <=15={} >15={} <=16={} >16={} max={}",
+        STATION_NAMES.len() - n_gt_8,
+        STATION_NAMES.len() - n_gt_15,
+        n_gt_15,
+        STATION_NAMES.len() - n_gt_16,
+        n_gt_16,
+        max_len,
     );
     println!("names with unicode prefix: {:?}", unicode_prefix);
 }
@@ -168,8 +173,21 @@ fn ptrhash(hash: u64) -> usize {
 }
 
 fn main() {
-    println!("align_of<u64x4> {}", std::mem::align_of::<u64x4>());
-    println!("align_of<u8x32> {}", std::mem::align_of::<u8x32>());
+    println!(
+        "{} {}",
+        std::mem::align_of::<u8x16>(),
+        std::mem::align_of::<u128>()
+    );
+    let buf = u8x16::from_slice(b"abcdefghixxxxxxx;hijklidsfjakldsfjkadsfd");
+    let mask = buf.simd_eq(u8x16::splat(b';'));
+    if let Some(name_len) = mask.first_set() {
+        let word: &u128 = unsafe { std::mem::transmute(&buf) };
+        let shift = (16 - name_len) * 8;
+        let word_masked = (word << shift) >> shift;
+        let masked_buf = word_masked.to_ne_bytes();
+        println!("{}", std::str::from_utf8(&masked_buf).unwrap());
+    }
+
     // let params = PtrHashParams {
     //     alpha: 0.9,
     //     c: 1.5,
@@ -199,7 +217,7 @@ fn main() {
     // let global_len = 10_000;
     // let threadgroup_len = 1_365;
     // println!("Total names: {}", STATION_NAMES.len());
-    // name_len_stats();
+    name_len_stats();
     // min_prefix();
 
     // println!(

@@ -4,7 +4,7 @@ use std::{
     fs::File,
     hash::{BuildHasher, Hasher},
     ops::BitXor,
-    simd::{cmp::SimdPartialEq, u64x4, u8x16, u8x32},
+    simd::{cmp::SimdPartialEq, simd_swizzle, u64x4, u8x16, u8x32},
     sync::{
         atomic::{AtomicUsize, Ordering},
         Mutex,
@@ -59,12 +59,16 @@ impl FxHash {
     }
 
     #[inline]
-    fn hash(s: u8x32, len: usize) -> u64 {
+    fn hash(s: u64x4) -> u64 {
         let mut h = FxHash::default();
-        let chunks: u64x4 = unsafe { std::mem::transmute(s) };
-        for bytes in chunks.to_array().into_iter().take(len.div_ceil(8)) {
-            h.hash64(bytes);
+        h.hash64(s[0]);
+        for i in 1..4 {
+            if s[i] == 0 {
+                break;
+            }
+            h.hash64(s[i]);
         }
+
         h.finish()
     }
 }
@@ -158,7 +162,7 @@ impl MPHParams {
         };
         for (i, name) in STATION_NAMES.iter().enumerate() {
             let name_simd = u8x32::load_or_default(name.as_bytes());
-            let idx = Self::index(name_simd, name.len());
+            let idx = Self::index(name_simd);
             this.indices[i] = idx;
             this.keys[idx] = name_simd;
         }
@@ -170,7 +174,7 @@ impl MPHParams {
     /// Constructed with PTRHash (https://github.com/RagnarGrootKoerkamp/PTRHash)
     /// Map all 314 station names uniquely to 512 buckets
     #[inline]
-    fn index(name: u8x32, len: usize) -> usize {
+    fn index(name: u8x32) -> usize {
         const PILOTS: [u8; 78] = [
             50, 110, 71, 13, 18, 27, 21, 14, 10, 16, 1, 14, 6, 11, 0, 2, 17, 2, 1, 4, 68, 79, 21,
             0, 22, 20, 60, 12, 30, 53, 62, 78, 27, 17, 2, 17, 13, 43, 21, 108, 19, 12, 25, 1, 55,
@@ -182,7 +186,7 @@ impl MPHParams {
         const C3: isize = -55;
         const P1: u64 = 11068046444225730560;
 
-        let hash = FxHash::hash(name, len);
+        let hash = FxHash::hash(unsafe { std::mem::transmute(name) });
         let is_large = hash >= P1;
         let rem = if is_large { REM_C2 } else { REM_C1 };
         let bucket = (is_large as isize * C3) + ((hash as u128 * rem as u128) >> 64) as isize;
@@ -373,6 +377,19 @@ where
     stations
 }
 
+#[inline]
+fn mask_name(chunk: u8x16, name_len: usize) -> u8x16 {
+    let chunk_atom: u128 = unsafe { std::mem::transmute(chunk) };
+    let shift = (16 - name_len) * 8;
+    let masked_chunk = (chunk_atom << shift) >> shift;
+    unsafe { std::mem::transmute(masked_chunk) }
+}
+
+const CONCAT_SWIZZLE: [usize; 32] = [
+    0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25,
+    26, 27, 28, 29, 30, 31,
+];
+
 fn process_cpu<'a>(
     buf: &'a [u8],
     mph_params: &'a MPHParams,
@@ -403,20 +420,33 @@ fn process_cpu<'a>(
         }
 
         while i < chunk_end {
-            let mut name_prefix = u8x32::from_slice(&buf[i..]);
-            let semi_mask = name_prefix.simd_eq(u8x32::splat(b';'));
-            let station = if let Some(semi_idx) = semi_mask.first_set() {
-                i += semi_idx + 1;
-                name_prefix = u8x32::load_or_default(&name_prefix.as_array()[..semi_idx]);
-                let mph_idx = MPHParams::index(name_prefix, semi_idx);
-                if name_prefix == mph_params.keys[mph_idx] {
-                    &mut stations.buckets[mph_idx]
+            let name_prefix0 = u8x16::from_slice(&buf[i..]);
+            let semi_mask0 = name_prefix0.simd_eq(u8x16::splat(b';'));
+            let (name_len, name_prefix) = if let Some(name_len) = semi_mask0.first_set() {
+                (name_len, mask_name(name_prefix0, name_len).resize::<32>(0))
+            } else {
+                let name_prefix1 = u8x16::from_slice(&buf[i + 16..]);
+                let semi_mask1 = name_prefix1.simd_eq(u8x16::splat(b';'));
+                if let Some(name_len) = semi_mask1.first_set() {
+                    let name_prefix = if name_len > 0 {
+                        let name_prefix1 = mask_name(name_prefix1, name_len);
+                        simd_swizzle!(name_prefix0, name_prefix1, CONCAT_SWIZZLE)
+                    } else {
+                        name_prefix0.resize::<32>(0)
+                    };
+                    (16 + name_len, name_prefix)
                 } else {
                     unreachable!("fallback path");
                 }
-            } else {
-                unreachable!("fallback path");
             };
+            i += name_len + 1;
+            let mph_idx = MPHParams::index(name_prefix);
+            let station = if name_prefix == mph_params.keys[mph_idx] {
+                &mut stations.buckets[mph_idx]
+            } else {
+                unreachable!("fallback path")
+            };
+
             let mut temp_buf = [0u8; 8];
             temp_buf.copy_from_slice(&buf[i..i + 8]);
             let temp_bytes = i64::from_le_bytes(temp_buf);
@@ -497,8 +527,8 @@ mod tests {
         };
 
         let actual = {
-            let s_simd = u8x32::load_or_default(S.as_bytes());
-            FxHash::hash(s_simd, S.len())
+            let s_simd = u8x32::from_slice(S.as_bytes());
+            FxHash::hash(unsafe { std::mem::transmute(s_simd) })
         };
 
         assert_eq!(expected, actual);
