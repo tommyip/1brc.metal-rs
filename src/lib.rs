@@ -1,9 +1,11 @@
 #![feature(portable_simd)]
 
+pub mod cpu;
 pub mod gpu_baseline;
 pub mod opt2;
 pub mod opt3;
 pub mod opt4;
+pub mod test;
 
 use std::{collections::HashMap, env, ffi, fmt, mem::size_of};
 
@@ -498,7 +500,7 @@ impl Station {
 
 #[derive(Default)]
 pub struct Stations<'a> {
-    inner: HashMap<&'a [u8], Station>,
+    pub inner: HashMap<&'a [u8], Station>,
 }
 
 impl fmt::Display for Station {

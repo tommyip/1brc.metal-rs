@@ -543,7 +543,7 @@ mod tests {
         };
 
         let actual = {
-            let s_simd = u8x32::from_slice(S.as_bytes());
+            let s_simd = u8x32::load_or_default(S.as_bytes());
             FxHash::hash(unsafe { std::mem::transmute(s_simd) })
         };
 
