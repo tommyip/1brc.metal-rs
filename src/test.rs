@@ -24,16 +24,12 @@ macro_rules! sample {
     };
 }
 
-const SAMPLES: [Sample; 16] = [
-    sample!("measurements-1"),
+const SAMPLES: [Sample; 12] = [
     sample!("measurements-1"),
     sample!("measurements-10"),
     sample!("measurements-10000-unique-keys"),
-    sample!("measurements-10000-unique-keys"),
-    sample!("measurements-2"),
     sample!("measurements-2"),
     sample!("measurements-20"),
-    sample!("measurements-3"),
     sample!("measurements-3"),
     sample!("measurements-boundaries"),
     sample!("measurements-complex-utf8"),
