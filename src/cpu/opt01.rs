@@ -4,7 +4,8 @@
 
 use crate::{Station, Stations};
 
-pub fn process<'a>(buf: &'a [u8]) -> Stations<'a> {
+pub fn process<'a>(buf: &'a [u8], len: usize) -> Stations<'a> {
+    let buf = &buf[..len];
     let mut stations = Stations::default();
 
     for line in buf.strip_suffix(&[b'\n']).unwrap().split(|&c| c == b'\n') {

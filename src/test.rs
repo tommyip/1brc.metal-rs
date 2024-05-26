@@ -1,4 +1,4 @@
-use crate::Stations;
+use crate::{Stations, MMAP_EXCESS};
 
 struct Sample {
     name: &'static str,
@@ -43,13 +43,16 @@ const SAMPLES: [Sample; 16] = [
     sample!("measurements-shortest"),
 ];
 
-pub fn correctness<'a, F>(process: F)
+pub fn correctness<F>(process: F)
 where
-    F: Fn(&'a [u8]) -> Stations<'a>,
+    F: Fn(&[u8], usize) -> Stations<'_>,
 {
     for sample in SAMPLES {
         println!("Sample {}", sample.name);
-        let actual = process(sample.txt.as_bytes());
+        let mut buf = vec![0u8; sample.txt.len() + MMAP_EXCESS];
+        buf[..sample.txt.len()].copy_from_slice(sample.txt.as_bytes());
+
+        let actual = process(&buf, sample.txt.len());
         assert_eq!(format!("{}\n", actual.to_string()), sample.out);
     }
 }

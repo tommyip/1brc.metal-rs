@@ -11,6 +11,10 @@ use std::{collections::HashMap, env, ffi, fmt, mem::size_of};
 
 use metal::MTLResourceOptions;
 
+/// Mmap 32 bytes more than the file size so that we can read in 8/16/32 bytes
+/// at a time for SIMD without getting out of bounds.
+pub const MMAP_EXCESS: usize = 32;
+
 pub const U64_SIZE: u64 = size_of::<u64>() as u64;
 pub const I32_SIZE: u64 = size_of::<i32>() as u64;
 pub const U32_SIZE: u64 = size_of::<u32>() as u64;
