@@ -498,7 +498,7 @@ impl Station {
 
 #[derive(Default)]
 pub struct Stations<'a> {
-    inner: HashMap<&'a str, Station>,
+    inner: HashMap<&'a [u8], Station>,
 }
 
 impl fmt::Display for Station {
@@ -520,7 +520,11 @@ impl<'a> fmt::Display for Stations<'a> {
                 f.write_str(", ")?;
             }
             let station = &self.inner[name];
-            f.write_fmt(format_args!("{}={}", name, station))?;
+            f.write_fmt(format_args!(
+                "{}={}",
+                unsafe { std::str::from_utf8_unchecked(name) },
+                station
+            ))?;
         }
         f.write_str("}")
     }

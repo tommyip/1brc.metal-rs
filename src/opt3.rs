@@ -87,10 +87,10 @@ impl MPHStationNames {
     }
 }
 
-fn cpu_impl<'a>(buf: &'a [u8], stations: &mut HashMap<&'a str, Station>) {
+fn cpu_impl<'a>(buf: &'a [u8], stations: &mut HashMap<&'a [u8], Station>) {
     buf[..buf.len() - 1].split(is_newline).for_each(|line| {
         let name_len = line.iter().position(|&c| c == b';').unwrap();
-        let name = unsafe { std::str::from_utf8_unchecked(&line[..name_len]) };
+        let name = &line[..name_len];
         let mut sign = 1;
         let mut temp = 0;
         for &c in &line[name_len + 1..] {
@@ -123,10 +123,10 @@ fn cpu_impl<'a>(buf: &'a [u8], stations: &mut HashMap<&'a str, Station>) {
 fn insert_gpu_hashmap(
     buckets: &[i32; HASHMAP_RAW_LEN],
     mph: &MPHStationNames,
-    stations: &mut HashMap<&str, Station>,
+    stations: &mut HashMap<&[u8], Station>,
 ) {
     for (&sorted_idx, bucket) in mph.indices.iter().zip(buckets.chunks_exact(4)) {
-        let name = STATION_NAMES[sorted_idx];
+        let name = STATION_NAMES[sorted_idx].as_bytes();
         let (min, max, sum, count) = (bucket[0], bucket[1], bucket[2], bucket[3]);
         if let Some(station) = stations.get_mut(name) {
             station.min = station.min.min(min);

@@ -139,11 +139,7 @@ impl<'a> MPHStations<'a> {
                 .or_insert(bucket_station);
         }
         Stations {
-            inner: self
-                .fallback
-                .into_iter()
-                .map(|(k, v)| (unsafe { std::str::from_utf8_unchecked(k) }, v))
-                .collect(),
+            inner: self.fallback.into_iter().collect(),
         }
     }
 }

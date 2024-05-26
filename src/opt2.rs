@@ -26,15 +26,14 @@ const HASHMAP_FIELDS: usize = 5;
 
 fn reconstruct_gpu_hashmap<'a>(
     buf: &'a [u8],
-    stations: &mut HashMap<&'a str, Station>,
+    stations: &mut HashMap<&'a [u8], Station>,
     buckets: &[i32],
 ) {
     for bucket in buckets.chunks_exact(HASHMAP_FIELDS) {
         let name_idx = unsafe { mem::transmute::<i32, u32>(bucket[0]) } as usize;
         if name_idx != 1 {
             let name_len = buf[name_idx..].iter().position(|c| *c == b';').unwrap();
-            let name =
-                unsafe { std::str::from_utf8_unchecked(&buf[name_idx..name_idx + name_len]) };
+            let name = &buf[name_idx..name_idx + name_len];
             let min = bucket[1];
             let max = bucket[2];
             let sum = bucket[3];
@@ -59,10 +58,10 @@ fn reconstruct_gpu_hashmap<'a>(
     }
 }
 
-fn cpu_impl<'a>(buf: &'a [u8], stations: &mut HashMap<&'a str, Station>) {
+fn cpu_impl<'a>(buf: &'a [u8], stations: &mut HashMap<&'a [u8], Station>) {
     buf[..buf.len() - 1].split(is_newline).for_each(|line| {
         let name_len = line.iter().position(|&c| c == b';').unwrap();
-        let name = unsafe { std::str::from_utf8_unchecked(&line[..name_len]) };
+        let name = &line[..name_len];
         let mut sign = 1;
         let mut temp = 0;
         for &c in &line[name_len + 1..] {
