@@ -4,15 +4,10 @@
 
 use crate::{Station, Stations};
 
-pub fn process<'a>(buf: &'a str) -> Stations<'a> {
+pub fn process<'a>(buf: &'a [u8]) -> Stations<'a> {
     let mut stations = Stations::default();
 
-    for line in buf
-        .as_bytes()
-        .strip_suffix(&[b'\n'])
-        .unwrap()
-        .split(|&c| c == b'\n')
-    {
+    for line in buf.strip_suffix(&[b'\n']).unwrap().split(|&c| c == b'\n') {
         let semi_idx = line.iter().position(|&c| c == b';').unwrap();
         let name = &line[..semi_idx];
         let mut temp = &line[semi_idx + 1..];

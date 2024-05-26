@@ -23,6 +23,6 @@ mod tests {
 
     #[test]
     fn test_correctness() {
-        test::correctness(process);
+        test::correctness(|buf| process(std::str::from_utf8(buf).unwrap()));
     }
 }

@@ -45,11 +45,11 @@ const SAMPLES: [Sample; 16] = [
 
 pub fn correctness<'a, F>(process: F)
 where
-    F: Fn(&'a str) -> Stations<'a>,
+    F: Fn(&'a [u8]) -> Stations<'a>,
 {
     for sample in SAMPLES {
         println!("Sample {}", sample.name);
-        let actual = process(sample.txt);
+        let actual = process(sample.txt.as_bytes());
         assert_eq!(format!("{}\n", actual.to_string()), sample.out);
     }
 }
