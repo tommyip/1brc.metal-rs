@@ -452,17 +452,17 @@ fn round_to_positive(x: f32) -> f32 {
 
 #[derive(Copy, Clone)]
 pub struct Station {
-    min: i32,
-    max: i32,
+    min: i16,
+    max: i16,
     sum: i32,
-    count: i32,
+    count: u32,
 }
 
 impl Default for Station {
     fn default() -> Self {
         Self {
-            min: i32::MAX,
-            max: i32::MIN,
+            min: i16::MAX,
+            max: i16::MIN,
             sum: 0,
             count: 0,
         }
@@ -470,23 +470,23 @@ impl Default for Station {
 }
 
 impl Station {
-    pub fn new(temp: i32) -> Self {
+    pub fn new(temp: i16) -> Self {
         Self {
             min: temp,
             max: temp,
-            sum: temp,
+            sum: temp as i32,
             count: 1,
         }
     }
 
-    pub fn update(&mut self, temp: i32) {
+    pub fn update(&mut self, temp: i16) {
         if temp < self.min {
             self.min = temp;
         }
         if temp > self.max {
             self.max = temp;
         }
-        self.sum += temp;
+        self.sum += temp as i32;
         self.count += 1;
     }
 

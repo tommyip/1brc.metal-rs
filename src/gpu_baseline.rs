@@ -30,10 +30,10 @@ fn reconstruct_gpu_hashmap<'a>(
             stations.insert(
                 name,
                 Station {
-                    min: bucket[1],
-                    max: bucket[2],
+                    min: bucket[1] as i16,
+                    max: bucket[2] as i16,
                     sum: bucket[3],
-                    count: bucket[4],
+                    count: bucket[4] as u32,
                 },
             );
         }

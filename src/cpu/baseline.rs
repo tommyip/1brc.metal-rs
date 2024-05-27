@@ -5,7 +5,7 @@ pub fn process<'a>(buf: &'a str) -> Stations<'a> {
 
     for line in buf.trim_end_matches('\n').split_terminator('\n') {
         let (name, temp) = line.split_once(';').unwrap();
-        let temp = (temp.parse::<f32>().unwrap() * 10.) as i32;
+        let temp = (temp.parse::<f32>().unwrap() * 10.) as i16;
         stations
             .inner
             .entry(name.as_bytes())

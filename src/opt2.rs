@@ -34,10 +34,10 @@ fn reconstruct_gpu_hashmap<'a>(
         if name_idx != 1 {
             let name_len = buf[name_idx..].iter().position(|c| *c == b';').unwrap();
             let name = &buf[name_idx..name_idx + name_len];
-            let min = bucket[1];
-            let max = bucket[2];
+            let min = bucket[1] as i16;
+            let max = bucket[2] as i16;
             let sum = bucket[3];
-            let count = bucket[4];
+            let count = bucket[4] as u32;
             if let Some(station) = stations.get_mut(name) {
                 station.min = station.min.min(min);
                 station.max = station.max.max(max);
@@ -68,14 +68,14 @@ fn cpu_impl<'a>(buf: &'a [u8], stations: &mut HashMap<&'a [u8], Station>) {
             if c == b'-' {
                 sign = -1;
             } else if c.is_ascii_digit() {
-                temp = temp * 10 + (c - b'0') as i32;
+                temp = temp * 10 + (c - b'0') as i16;
             }
         }
         temp *= sign;
         if let Some(station) = stations.get_mut(name) {
             station.min = station.min.min(temp);
             station.max = station.max.max(temp);
-            station.sum += temp;
+            station.sum += temp as i32;
             station.count += 1;
         } else {
             stations.insert(
@@ -83,7 +83,7 @@ fn cpu_impl<'a>(buf: &'a [u8], stations: &mut HashMap<&'a [u8], Station>) {
                 Station {
                     min: temp,
                     max: temp,
-                    sum: temp,
+                    sum: temp as i32,
                     count: 1,
                 },
             );

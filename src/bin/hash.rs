@@ -3,7 +3,7 @@
 
 use std::{collections::HashSet, fmt, ops::BitXor};
 
-use one_billion_row::STATION_NAMES;
+use one_billion_row::{Station, STATION_NAMES};
 use ptr_hash::hash::Hasher;
 
 fn name_len_stats() {
@@ -174,11 +174,7 @@ enum Key<'a> {
 }
 
 fn main() {
-    println!(
-        "{} {}",
-        std::mem::size_of::<Key<'_>>(),
-        std::mem::size_of::<Option<Key<'_>>>()
-    );
+    println!("{}", std::mem::size_of::<Station>());
 
     // let buf = u8x16::from_slice(b"abcdefghixxxxxxx;hijklidsfjakldsfjkadsfd");
     // let mask = buf.simd_eq(u8x16::splat(b';'));

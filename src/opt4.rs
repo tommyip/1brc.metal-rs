@@ -33,14 +33,14 @@ const GPU_CHUNK_LEN: u64 = {
 const CPU_CHUNK_LEN: usize = 16 * 1024;
 const HASHMAP_LEN: usize = 512;
 
-fn swar_parse_temp(temp: i64, dot_pos: usize) -> i32 {
+fn swar_parse_temp(temp: i64, dot_pos: usize) -> i16 {
     const MAGIC_MUL: i64 = 100 * 0x1000000 + 10 * 0x10000 + 1;
     let shift = 28 - dot_pos;
     let sign = (!temp << 59) >> 63;
     let minus_filter = !(sign & 0xFF);
     let digits = ((temp & minus_filter) << shift) & 0x0F000F0F00;
     let abs_value = (digits.wrapping_mul(MAGIC_MUL) as u64 >> 32) & 0x3FF;
-    ((abs_value as i64 ^ sign) - sign) as i32
+    ((abs_value as i64 ^ sign) - sign) as i16
 }
 
 /// Slightly modified FxHash (from Rustc & Firefox)
@@ -209,9 +209,9 @@ fn process_cpu_naive<'a>(buf: &'a [u8], stations: &mut StationsHashMap<'a>) {
             };
             let temp = sign
                 * match temp {
-                    [b, b'.', c] => 10 * (b - b'0') as i32 + (c - b'0') as i32,
+                    [b, b'.', c] => 10 * (b - b'0') as i16 + (c - b'0') as i16,
                     [a, b, b'.', c] => {
-                        100 * (a - b'0') as i32 + 10 * (b - b'0') as i32 + (c - b'0') as i32
+                        100 * (a - b'0') as i16 + 10 * (b - b'0') as i16 + (c - b'0') as i16
                     }
                     _ => unreachable!(),
                 };
@@ -552,7 +552,7 @@ mod tests {
 
     #[test]
     fn test_swar_parse_temp() {
-        fn parse(s: &str) -> i32 {
+        fn parse(s: &str) -> i16 {
             let mut buf = [0u8; 8];
             buf[..s.len()].copy_from_slice(s.as_bytes());
             let bytes = i64::from_le_bytes(buf);

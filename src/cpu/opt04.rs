@@ -95,9 +95,9 @@ pub fn process<'a>(buf: &'a [u8], len: usize) -> Stations<'a> {
             i += 1;
         }
         let (abs_temp, temp_len) = match &buf[i..i + 4] {
-            [b, b'.', c, _] => (10 * (b - b'0') as i32 + (c - b'0') as i32, 3),
+            [b, b'.', c, _] => (10 * (b - b'0') as i16 + (c - b'0') as i16, 3),
             [a, b, b'.', c] => (
-                100 * (a - b'0') as i32 + 10 * (b - b'0') as i32 + (c - b'0') as i32,
+                100 * (a - b'0') as i16 + 10 * (b - b'0') as i16 + (c - b'0') as i16,
                 4,
             ),
             _ => unreachable!(),

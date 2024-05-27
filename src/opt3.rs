@@ -97,14 +97,14 @@ fn cpu_impl<'a>(buf: &'a [u8], stations: &mut HashMap<&'a [u8], Station>) {
             if c == b'-' {
                 sign = -1;
             } else if c.is_ascii_digit() {
-                temp = temp * 10 + (c - b'0') as i32;
+                temp = temp * 10 + (c - b'0') as i16;
             }
         }
         temp *= sign;
         if let Some(station) = stations.get_mut(name) {
             station.min = station.min.min(temp);
             station.max = station.max.max(temp);
-            station.sum += temp;
+            station.sum += temp as i32;
             station.count += 1;
         } else {
             stations.insert(
@@ -112,7 +112,7 @@ fn cpu_impl<'a>(buf: &'a [u8], stations: &mut HashMap<&'a [u8], Station>) {
                 Station {
                     min: temp,
                     max: temp,
-                    sum: temp,
+                    sum: temp as i32,
                     count: 1,
                 },
             );
@@ -127,7 +127,12 @@ fn insert_gpu_hashmap(
 ) {
     for (&sorted_idx, bucket) in mph.indices.iter().zip(buckets.chunks_exact(4)) {
         let name = STATION_NAMES[sorted_idx].as_bytes();
-        let (min, max, sum, count) = (bucket[0], bucket[1], bucket[2], bucket[3]);
+        let (min, max, sum, count) = (
+            bucket[0] as i16,
+            bucket[1] as i16,
+            bucket[2],
+            bucket[3] as u32,
+        );
         if let Some(station) = stations.get_mut(name) {
             station.min = station.min.min(min);
             station.max = station.max.max(max);

@@ -19,9 +19,9 @@ pub fn process<'a>(buf: &'a [u8], len: usize) -> Stations<'a> {
         }
         let temp = sign
             * match temp {
-                [b, b'.', c] => 10 * (b - b'0') as i32 + (c - b'0') as i32,
+                [b, b'.', c] => 10 * (b - b'0') as i16 + (c - b'0') as i16,
                 [a, b, b'.', c] => {
-                    100 * (a - b'0') as i32 + 10 * (b - b'0') as i32 + (c - b'0') as i32
+                    100 * (a - b'0') as i16 + 10 * (b - b'0') as i16 + (c - b'0') as i16
                 }
                 _ => unreachable!(),
             };
