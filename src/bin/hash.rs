@@ -1,12 +1,7 @@
 #![allow(dead_code)]
 #![feature(portable_simd)]
 
-use std::{
-    collections::HashSet,
-    fmt,
-    ops::BitXor,
-    simd::{cmp::SimdPartialEq, u8x16},
-};
+use std::{collections::HashSet, fmt, ops::BitXor, simd::u8x16};
 
 use one_billion_row::STATION_NAMES;
 use ptr_hash::hash::Hasher;
@@ -173,20 +168,21 @@ fn ptrhash(hash: u64) -> usize {
 }
 
 fn main() {
+    println!("{:064b}", (u64::MAX >> (64 - 14)));
     println!(
         "{} {}",
         std::mem::align_of::<u8x16>(),
         std::mem::align_of::<u128>()
     );
-    let buf = u8x16::from_slice(b"abcdefghixxxxxxx;hijklidsfjakldsfjkadsfd");
-    let mask = buf.simd_eq(u8x16::splat(b';'));
-    if let Some(name_len) = mask.first_set() {
-        let word: &u128 = unsafe { std::mem::transmute(&buf) };
-        let shift = (16 - name_len) * 8;
-        let word_masked = (word << shift) >> shift;
-        let masked_buf = word_masked.to_ne_bytes();
-        println!("{}", std::str::from_utf8(&masked_buf).unwrap());
-    }
+    // let buf = u8x16::from_slice(b"abcdefghixxxxxxx;hijklidsfjakldsfjkadsfd");
+    // let mask = buf.simd_eq(u8x16::splat(b';'));
+    // if let Some(name_len) = mask.first_set() {
+    //     let word: &u128 = unsafe { std::mem::transmute(&buf) };
+    //     let shift = (16 - name_len) * 8;
+    //     let word_masked = (word << shift) >> shift;
+    //     let masked_buf = word_masked.to_ne_bytes();
+    //     println!("{}", std::str::from_utf8(&masked_buf).unwrap());
+    // }
 
     // let params = PtrHashParams {
     //     alpha: 0.9,
