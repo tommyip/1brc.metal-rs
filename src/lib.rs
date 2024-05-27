@@ -1,4 +1,5 @@
 #![feature(portable_simd)]
+#![feature(hash_raw_entry)]
 
 pub mod cpu;
 pub mod gpu_baseline;
