@@ -1,7 +1,7 @@
 #![allow(dead_code)]
 #![feature(portable_simd)]
 
-use std::{collections::HashSet, fmt, ops::BitXor, simd::u8x16};
+use std::{collections::HashSet, fmt, ops::BitXor};
 
 use one_billion_row::STATION_NAMES;
 use ptr_hash::hash::Hasher;
@@ -167,13 +167,19 @@ fn ptrhash(hash: u64) -> usize {
         & ((1 << 9) - 1) as usize;
 }
 
+#[derive(Clone)]
+enum Key<'a> {
+    Inline([u8; 16]),
+    Str(&'a [u8]),
+}
+
 fn main() {
-    println!("{:064b}", (u64::MAX >> (64 - 14)));
     println!(
         "{} {}",
-        std::mem::align_of::<u8x16>(),
-        std::mem::align_of::<u128>()
+        std::mem::size_of::<Key<'_>>(),
+        std::mem::size_of::<Option<Key<'_>>>()
     );
+
     // let buf = u8x16::from_slice(b"abcdefghixxxxxxx;hijklidsfjakldsfjkadsfd");
     // let mask = buf.simd_eq(u8x16::splat(b';'));
     // if let Some(name_len) = mask.first_set() {
