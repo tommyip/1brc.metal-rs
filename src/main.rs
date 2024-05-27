@@ -9,7 +9,7 @@ fn main() {
     let len = file.metadata().unwrap().len() as usize;
     let mmap = unsafe { MmapOptions::new().len(len + MMAP_EXCESS).map(file).unwrap() };
 
-    let stations = cpu::opt06::process(&mmap[..], len);
+    let stations = cpu::opt07::process(&mmap[..], len);
 
     println!("{}", stations);
 }

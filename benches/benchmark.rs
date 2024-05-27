@@ -38,6 +38,9 @@ pub fn benchmark(c: &mut Criterion) {
     group.bench_function("cpu_06", |b| {
         b.iter(|| black_box(cpu::opt06::process(&measurements, len)))
     });
+    group.bench_function("cpu_07", |b| {
+        b.iter(|| black_box(cpu::opt07::process(&measurements, len)))
+    });
 
     group.finish();
 }
