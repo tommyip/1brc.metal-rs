@@ -108,6 +108,72 @@ fn swar_find_semi_2x(chars: u128) -> u128 {
         & (!diff & 0x80808080808080808080808080808080)
 }
 
+struct Name {
+    prefix: [u64; INLINE_KEY_SIZE],
+    name_len: usize,
+    hash: PerfectHash,
+}
+
+fn read_name<'a>(buf: &'a [u8]) -> Name {
+    let mut hash = PerfectHash::default();
+    let mut prefix = [0u64; INLINE_KEY_SIZE];
+    let mut name_len = 0usize;
+
+    // Special case for first 16 bytes
+    let mut u128_buf = [0u128; 1];
+    let u64x2_buf: &[u64; 2] = unsafe { transmute(&u128_buf) };
+    unsafe { transmute::<_, &mut [u8; 16]>(&mut u128_buf) }.copy_from_slice(&buf[..16]);
+
+    let semi_bits = swar_find_semi_2x(u128_buf[0]);
+    if semi_bits != 0 {
+        name_len = (semi_bits.trailing_zeros() >> 3) as usize;
+        u128_buf[0] &= u128::MAX >> ((16 - name_len) << 3);
+        hash.write_u64(u64x2_buf[0]);
+        if name_len > 8 {
+            hash.write_u64(u64x2_buf[1]);
+        }
+        prefix[0] = u64x2_buf[0];
+        prefix[1] = u64x2_buf[1];
+    } else {
+        name_len += 16;
+        prefix[0] = u64x2_buf[0];
+        prefix[1] = u64x2_buf[1];
+        hash.write_u64(u64x2_buf[0]);
+        hash.write_u64(u64x2_buf[1]);
+
+        // Fall back to remaining bytes
+        let mut chars_buf = [0u8; 8];
+        for block in 2.. {
+            chars_buf.copy_from_slice(&buf[name_len..name_len + 8]);
+            let mut chars = u64::from_le_bytes(chars_buf);
+            let semi_bits = swar_find_semi(chars);
+            if semi_bits != 0 {
+                let lane_id = semi_bits.trailing_zeros() >> 3;
+                if lane_id > 0 {
+                    chars = chars & (u64::MAX >> ((8 - lane_id) << 3));
+                    hash.write_u64(chars);
+                    if block < prefix.len() {
+                        prefix[block] = chars;
+                    }
+                }
+                name_len += lane_id as usize;
+                break;
+            }
+            hash.write_u64(chars);
+            if block < prefix.len() {
+                prefix[block] = chars;
+            }
+            name_len += 8;
+        }
+    }
+
+    Name {
+        prefix,
+        name_len,
+        hash,
+    }
+}
+
 fn swar_parse_temp(chars: i64, dot_pos: usize) -> i16 {
     const MAGIC_MUL: i64 = 100 * 0x1000000 + 10 * 0x10000 + 1;
     let shift = 28 - dot_pos;
@@ -118,73 +184,33 @@ fn swar_parse_temp(chars: i64, dot_pos: usize) -> i16 {
     ((abs_value as i64 ^ sign) - sign) as i16
 }
 
+fn read_temp(buf: &[u8]) -> (i16, usize) {
+    let mut chars_buf = [0u8; 8];
+    chars_buf.copy_from_slice(&buf[..8]);
+    let chars = i64::from_le_bytes(chars_buf);
+    let dot_pos = (!chars & 0x10101000).trailing_zeros() as usize;
+    let temp = swar_parse_temp(chars, dot_pos);
+    (temp, (dot_pos >> 3) + 2)
+}
+
 pub fn process<'a>(buf: &'a [u8], len: usize) -> Stations<'a> {
     let mph_data = PerfectHashData::new();
     let mut mph: Vec<Station> = vec![Station::default(); MPH_SIZE];
     let mut stations = HashMap::<&'a [u8], Station, BuildHasherDefault<PerfectHash>>::default();
 
     let mut i = 0;
-    let mut chars_buf = [0u8; 8];
     while i < len {
         let name_idx = i;
-        let mut hash = PerfectHash::default();
-        let mut prefix = [0u64; INLINE_KEY_SIZE];
-        let mut semi_idx = 0;
+        let Name {
+            prefix,
+            name_len,
+            hash,
+        } = read_name(&buf[name_idx..]);
+        i += name_len + 1;
 
-        let mut u128_buf = [0u128; 1];
-        unsafe { transmute::<_, &mut [u8; 16]>(&mut u128_buf) }.copy_from_slice(&buf[i..i + 16]);
-        let u64x2_buf: &[u64; 2] = unsafe { transmute(&u128_buf) };
-        let semi_bits = swar_find_semi_2x(u128_buf[0]);
-        if semi_bits != 0 {
-            let lane_id = semi_bits.trailing_zeros() >> 3;
-            u128_buf[0] &= u128::MAX >> ((16 - lane_id) << 3);
-            hash.write_u64(u64x2_buf[0]);
-            if lane_id > 8 {
-                hash.write_u64(u64x2_buf[1]);
-            }
-            prefix[0] = u64x2_buf[0];
-            prefix[1] = u64x2_buf[1];
-            semi_idx = i + lane_id as usize;
-            i = semi_idx + 1;
-        } else {
-            i += 16;
-            prefix[0] = u64x2_buf[0];
-            prefix[1] = u64x2_buf[1];
-            hash.write_u64(u64x2_buf[0]);
-            hash.write_u64(u64x2_buf[1]);
+        let (temp, temp_len) = read_temp(&buf[i..]);
+        i += temp_len + 1;
 
-            for block in 2.. {
-                chars_buf.copy_from_slice(&buf[i..i + 8]);
-                let mut chars = u64::from_le_bytes(chars_buf);
-                let semi_bits = swar_find_semi(chars);
-                if semi_bits != 0 {
-                    let lane_id = semi_bits.trailing_zeros() >> 3;
-                    if lane_id > 0 {
-                        chars = chars & (u64::MAX >> ((8 - lane_id) << 3));
-                        hash.write_u64(chars);
-                        if block < prefix.len() {
-                            prefix[block] = chars;
-                        }
-                    }
-                    semi_idx = i + lane_id as usize;
-                    i = semi_idx + 1;
-                    break;
-                }
-                hash.write_u64(chars);
-                if block < prefix.len() {
-                    prefix[block] = chars;
-                }
-                i += 8;
-            }
-        }
-
-        chars_buf.copy_from_slice(&buf[i..i + 8]);
-        let chars = i64::from_le_bytes(chars_buf);
-        let dot_pos = (!chars & 0x10101000).trailing_zeros() as usize;
-        i += (dot_pos >> 3) + 3;
-        let temp = swar_parse_temp(chars, dot_pos);
-
-        let name_len = semi_idx - name_idx;
         // Try storing in minimal perfect hash table
         if name_len <= 26 {
             let idx = hash.index();
@@ -195,7 +221,7 @@ pub fn process<'a>(buf: &'a [u8], len: usize) -> Stations<'a> {
         }
         // Fallback to general hashmap
         stations
-            .entry(&buf[name_idx..semi_idx])
+            .entry(&buf[name_idx..name_idx + name_len])
             .and_modify(|station| station.update(temp))
             .or_insert(Station::new(temp));
     }
