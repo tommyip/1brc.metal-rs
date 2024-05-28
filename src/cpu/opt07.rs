@@ -1,4 +1,5 @@
 //! Optimizations
+//! 1. 16-byte prefix special case for read name
 
 use std::{
     collections::HashMap,
@@ -23,21 +24,13 @@ impl<'a> Reader<'a> {
     }
 
     fn read16(&mut self) -> u128 {
-        let mut buf = 0u128;
-        unsafe {
-            let buf_u8: &mut [u8; 16] = transmute(&mut buf);
-            buf_u8.copy_from_slice(self.buf.get_unchecked(self.i..self.i + 16));
-        }
-        buf
+        let buf: &[u8; 16] = unsafe { transmute(self.buf.as_ptr().add(self.i)) };
+        u128::from_le_bytes(*buf)
     }
 
     fn read8(&mut self) -> u64 {
-        let mut buf = 0u64;
-        unsafe {
-            let buf_u8: &mut [u8; 8] = transmute(&mut buf);
-            buf_u8.copy_from_slice(self.buf.get_unchecked(self.i..self.i + 8));
-        }
-        buf
+        let buf: &[u8; 8] = unsafe { transmute(self.buf.as_ptr().add(self.i)) };
+        u64::from_le_bytes(*buf)
     }
 
     fn advance(&mut self, incr: usize) {
