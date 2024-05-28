@@ -1,54 +1,39 @@
-use crate::{Stations, MMAP_EXCESS};
+use std::{
+    fs::{self, File},
+    path::Path,
+};
 
-struct Sample {
-    name: &'static str,
-    txt: &'static str,
-    out: &'static str,
-}
+use crate::{mmap_aligned, Stations, BUF_ALIGNMENT};
 
-macro_rules! sample {
-    ($name:literal) => {
-        Sample {
-            name: $name,
-            txt: include_str!(concat!(
-                env!("CARGO_MANIFEST_DIR"),
-                "/tests/",
-                concat!($name, ".txt")
-            )),
-            out: include_str!(concat!(
-                env!("CARGO_MANIFEST_DIR"),
-                "/tests/",
-                concat!($name, ".out")
-            )),
-        }
-    };
-}
-
-const SAMPLES: [Sample; 12] = [
-    sample!("measurements-1"),
-    sample!("measurements-10"),
-    sample!("measurements-10000-unique-keys"),
-    sample!("measurements-2"),
-    sample!("measurements-20"),
-    sample!("measurements-3"),
-    sample!("measurements-boundaries"),
-    sample!("measurements-complex-utf8"),
-    sample!("measurements-dot"),
-    sample!("measurements-rounding"),
-    sample!("measurements-short"),
-    sample!("measurements-shortest"),
+const SAMPLE_NAMES: [&str; 12] = [
+    "measurements-1",
+    "measurements-10",
+    "measurements-10000-unique-keys",
+    "measurements-2",
+    "measurements-20",
+    "measurements-3",
+    "measurements-boundaries",
+    "measurements-complex-utf8",
+    "measurements-dot",
+    "measurements-rounding",
+    "measurements-short",
+    "measurements-shortest",
 ];
 
 pub fn correctness<F>(process: F)
 where
     F: Fn(&[u8], usize) -> Stations<'_>,
 {
-    for sample in SAMPLES {
-        println!("Sample {}", sample.name);
-        let mut buf = vec![0u8; sample.txt.len() + MMAP_EXCESS];
-        buf[..sample.txt.len()].copy_from_slice(sample.txt.as_bytes());
+    let base_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests");
+    for sample in SAMPLE_NAMES {
+        println!("Sample {}", sample);
+        let txt_path = base_path.join(sample).with_extension("txt");
+        let out_path = base_path.join(sample).with_extension("out");
 
-        let actual = process(&buf, sample.txt.len());
-        assert_eq!(format!("{}\n", actual.to_string()), sample.out);
+        let (mmap, len) = mmap_aligned::<BUF_ALIGNMENT>(&File::open(txt_path).unwrap());
+        let out = fs::read_to_string(out_path).unwrap();
+
+        let actual = process(&mmap[..], len);
+        assert_eq!(format!("{}\n", actual.to_string()), out);
     }
 }

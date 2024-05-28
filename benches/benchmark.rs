@@ -3,7 +3,7 @@ use std::{fs::File, path::PathBuf};
 use criterion::{black_box, criterion_group, criterion_main, Criterion, Throughput};
 
 use memmap2::MmapOptions;
-use one_billion_row::{cpu, MMAP_EXCESS};
+use one_billion_row::{cpu, BUF_ALIGNMENT};
 
 pub fn benchmark(c: &mut Criterion) {
     let file = &File::open(
@@ -11,7 +11,12 @@ pub fn benchmark(c: &mut Criterion) {
     )
     .unwrap();
     let len = file.metadata().unwrap().len() as usize;
-    let measurements = unsafe { MmapOptions::new().len(len + MMAP_EXCESS).map(file).unwrap() };
+    let measurements = unsafe {
+        MmapOptions::new()
+            .len(len + BUF_ALIGNMENT)
+            .map(file)
+            .unwrap()
+    };
 
     let mut group = c.benchmark_group("1brc");
     group.throughput(Throughput::Bytes(measurements.len() as u64));

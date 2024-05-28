@@ -1,5 +1,6 @@
 #![feature(portable_simd)]
 #![feature(hash_raw_entry)]
+#![feature(pointer_is_aligned_to)]
 
 pub mod cpu;
 pub mod gpu_baseline;
@@ -8,13 +9,15 @@ pub mod opt3;
 pub mod opt4;
 pub mod test;
 
-use std::{collections::HashMap, env, ffi, fmt, mem::size_of};
+use std::{collections::HashMap, env, ffi, fmt, fs::File, mem::size_of};
 
+use memmap2::{Mmap, MmapOptions};
 use metal::MTLResourceOptions;
 
-/// Mmap 32 bytes more than the file size so that we can read in 8/16/32 bytes
-/// at a time for SIMD without getting out of bounds.
-pub const MMAP_EXCESS: usize = 32;
+/// Ensure buffer is aligned to a certain alignment boundary and the length
+/// is a multiple of the alignment. This allows reading a chunk of bytes
+/// at a time for SIMD processing without getting out of bounds.
+pub const BUF_ALIGNMENT: usize = 32;
 
 pub const U64_SIZE: u64 = size_of::<u64>() as u64;
 pub const I32_SIZE: u64 = size_of::<i32>() as u64;
@@ -435,6 +438,14 @@ pub const STATION_NAMES: [&'static str; 413] = [
     "Zanzibar City",
     "Zürich",
 ];
+
+pub fn mmap_aligned<'a, const ALIGNMENT: usize>(file: &'a File) -> (Mmap, usize) {
+    let len = file.metadata().unwrap().len() as usize;
+    let aligned_len = (len + ALIGNMENT).div_ceil(ALIGNMENT) * ALIGNMENT;
+    let mmap = unsafe { MmapOptions::new().len(aligned_len).map(file).unwrap() };
+    assert!(mmap.as_ptr().is_aligned_to(ALIGNMENT));
+    (mmap, len)
+}
 
 pub fn c_void<T>(value_ref: &T) -> *const ffi::c_void {
     (value_ref as *const T) as *const ffi::c_void
