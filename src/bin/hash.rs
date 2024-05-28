@@ -176,8 +176,8 @@ enum Key<'a> {
 fn main() {
     println!(
         "{} {}",
-        std::mem::align_of::<[u64; 2]>(),
-        std::mem::align_of::<[u128; 1]>()
+        std::mem::align_of::<u128>(),
+        std::mem::align_of::<[u64; 2]>()
     );
     // let buf = u8x16::from_slice(b"abcdefghixxxxxxx;hijklidsfjakldsfjkadsfd");
     // let mask = buf.simd_eq(u8x16::splat(b';'));

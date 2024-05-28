@@ -3,7 +3,7 @@ use std::{
     path::Path,
 };
 
-use crate::{mmap_aligned, Stations, BUF_ALIGNMENT};
+use crate::{mmap, Stations, BUF_EXCESS};
 
 const SAMPLE_NAMES: [&str; 12] = [
     "measurements-1",
@@ -30,7 +30,7 @@ where
         let txt_path = base_path.join(sample).with_extension("txt");
         let out_path = base_path.join(sample).with_extension("out");
 
-        let (mmap, len) = mmap_aligned::<BUF_ALIGNMENT>(&File::open(txt_path).unwrap());
+        let (mmap, len) = mmap::<BUF_EXCESS>(&File::open(txt_path).unwrap());
         let out = fs::read_to_string(out_path).unwrap();
 
         let actual = process(&mmap[..], len);

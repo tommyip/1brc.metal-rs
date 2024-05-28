@@ -2,21 +2,14 @@ use std::{fs::File, path::PathBuf};
 
 use criterion::{black_box, criterion_group, criterion_main, Criterion, Throughput};
 
-use memmap2::MmapOptions;
-use one_billion_row::{cpu, BUF_ALIGNMENT};
+use one_billion_row::{cpu, mmap, BUF_EXCESS};
 
 pub fn benchmark(c: &mut Criterion) {
-    let file = &File::open(
+    let file = File::open(
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../1brc/data/measurements-1m.txt"),
     )
     .unwrap();
-    let len = file.metadata().unwrap().len() as usize;
-    let measurements = unsafe {
-        MmapOptions::new()
-            .len(len + BUF_ALIGNMENT)
-            .map(file)
-            .unwrap()
-    };
+    let (measurements, len) = mmap::<BUF_EXCESS>(&file);
 
     let mut group = c.benchmark_group("1brc");
     group.throughput(Throughput::Bytes(measurements.len() as u64));

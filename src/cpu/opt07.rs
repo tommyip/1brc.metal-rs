@@ -1,5 +1,4 @@
 //! Optimizations
-//! 1. Parse 16-byte prefix than fallback to 8-byte loop
 
 use std::{
     collections::HashMap,
@@ -11,7 +10,40 @@ use std::{
 use crate::{Station, Stations, STATION_NAMES};
 
 const MPH_SIZE: usize = 512;
-const INLINE_KEY_SIZE: usize = 4;
+const PREFIX_SIZE_U64: usize = 4;
+
+struct Reader<'a> {
+    buf: &'a [u8],
+    i: usize,
+}
+
+impl<'a> Reader<'a> {
+    fn new(buf: &'a [u8]) -> Self {
+        Self { buf, i: 0 }
+    }
+
+    fn read16(&mut self) -> u128 {
+        let mut buf = 0u128;
+        unsafe {
+            let buf_u8: &mut [u8; 16] = transmute(&mut buf);
+            buf_u8.copy_from_slice(self.buf.get_unchecked(self.i..self.i + 16));
+        }
+        buf
+    }
+
+    fn read8(&mut self) -> u64 {
+        let mut buf = 0u64;
+        unsafe {
+            let buf_u8: &mut [u8; 8] = transmute(&mut buf);
+            buf_u8.copy_from_slice(self.buf.get_unchecked(self.i..self.i + 8));
+        }
+        buf
+    }
+
+    fn advance(&mut self, incr: usize) {
+        self.i += incr;
+    }
+}
 
 #[derive(Default)]
 struct PerfectHash {
@@ -76,7 +108,7 @@ impl PerfectHash {
 
 struct PerfectHashData {
     /// Station names matching MPH bucket indices
-    keys: [[u64; INLINE_KEY_SIZE]; MPH_SIZE],
+    keys: [[u64; PREFIX_SIZE_U64]; MPH_SIZE],
     /// Map bucket to STATION_NAMES
     indices: [usize; MPH_SIZE],
 }
@@ -108,70 +140,66 @@ fn swar_find_semi_2x(chars: u128) -> u128 {
         & (!diff & 0x80808080808080808080808080808080)
 }
 
-struct Name {
-    prefix: [u64; INLINE_KEY_SIZE],
-    name_len: usize,
+struct Name<'a> {
+    prefix: [u64; PREFIX_SIZE_U64],
+    name: &'a [u8],
     hash: PerfectHash,
 }
 
-fn read_name<'a>(buf: &'a [u8]) -> Name {
+/// Read station name and advance reader to the start of the temperature
+fn read_name<'a>(rdr: &mut Reader<'a>) -> Name<'a> {
+    let start = rdr.i;
     let mut hash = PerfectHash::default();
-    let mut prefix = [0u64; INLINE_KEY_SIZE];
-    let mut name_len = 0usize;
+    let mut prefix = [0u64; PREFIX_SIZE_U64];
 
     // Special case for first 16 bytes
-    let mut u128_buf = [0u128; 1];
-    let u64x2_buf: &[u64; 2] = unsafe { transmute(&u128_buf) };
-    unsafe { transmute::<_, &mut [u8; 16]>(&mut u128_buf) }.copy_from_slice(&buf[..16]);
-
-    let semi_bits = swar_find_semi_2x(u128_buf[0]);
+    let mut prefix0 = rdr.read16();
+    let semi_bits = swar_find_semi_2x(prefix0);
     if semi_bits != 0 {
-        name_len = (semi_bits.trailing_zeros() >> 3) as usize;
-        u128_buf[0] &= u128::MAX >> ((16 - name_len) << 3);
-        hash.write_u64(u64x2_buf[0]);
-        if name_len > 8 {
-            hash.write_u64(u64x2_buf[1]);
+        let lane_id = (semi_bits.trailing_zeros() >> 3) as usize;
+        rdr.advance(lane_id + 1);
+        prefix0 &= u128::MAX >> ((16 - lane_id) << 3);
+        let prefix0_u64x2: &[u64; 2] = unsafe { transmute(&prefix0) };
+        hash.write_u64(prefix0_u64x2[0]);
+        if lane_id > 8 {
+            hash.write_u64(prefix0_u64x2[1]);
         }
-        prefix[0] = u64x2_buf[0];
-        prefix[1] = u64x2_buf[1];
+        prefix[0] = prefix0_u64x2[0];
+        prefix[1] = prefix0_u64x2[1];
     } else {
-        name_len += 16;
-        prefix[0] = u64x2_buf[0];
-        prefix[1] = u64x2_buf[1];
-        hash.write_u64(u64x2_buf[0]);
-        hash.write_u64(u64x2_buf[1]);
+        let prefix0_u64x2: &[u64; 2] = unsafe { transmute(&prefix0) };
+        prefix[0] = prefix0_u64x2[0];
+        prefix[1] = prefix0_u64x2[1];
+        hash.write_u64(prefix0_u64x2[0]);
+        hash.write_u64(prefix0_u64x2[1]);
 
+        rdr.advance(16);
         // Fall back to remaining bytes
-        let mut chars_buf = [0u8; 8];
         for block in 2.. {
-            chars_buf.copy_from_slice(&buf[name_len..name_len + 8]);
-            let mut chars = u64::from_le_bytes(chars_buf);
+            let chars = rdr.read8();
             let semi_bits = swar_find_semi(chars);
             if semi_bits != 0 {
-                let lane_id = semi_bits.trailing_zeros() >> 3;
+                let lane_id = (semi_bits.trailing_zeros() >> 3) as usize;
                 if lane_id > 0 {
-                    chars = chars & (u64::MAX >> ((8 - lane_id) << 3));
+                    let chars = chars & (u64::MAX >> ((8 - lane_id) << 3));
                     hash.write_u64(chars);
                     if block < prefix.len() {
                         prefix[block] = chars;
                     }
                 }
-                name_len += lane_id as usize;
+                rdr.advance(lane_id + 1);
                 break;
             }
             hash.write_u64(chars);
             if block < prefix.len() {
                 prefix[block] = chars;
             }
-            name_len += 8;
+            rdr.advance(8);
         }
     }
 
-    Name {
-        prefix,
-        name_len,
-        hash,
-    }
+    let name = &rdr.buf[start..rdr.i - 1];
+    Name { prefix, name, hash }
 }
 
 fn swar_parse_temp(chars: i64, dot_pos: usize) -> i16 {
@@ -184,13 +212,13 @@ fn swar_parse_temp(chars: i64, dot_pos: usize) -> i16 {
     ((abs_value as i64 ^ sign) - sign) as i16
 }
 
-fn read_temp(buf: &[u8]) -> (i16, usize) {
-    let mut chars_buf = [0u8; 8];
-    chars_buf.copy_from_slice(&buf[..8]);
-    let chars = i64::from_le_bytes(chars_buf);
+/// Read temperature and advance reader to the next line
+fn read_temp(rdr: &mut Reader<'_>) -> i16 {
+    let chars = rdr.read8() as i64;
     let dot_pos = (!chars & 0x10101000).trailing_zeros() as usize;
     let temp = swar_parse_temp(chars, dot_pos);
-    (temp, (dot_pos >> 3) + 2)
+    rdr.advance((dot_pos >> 3) + 3);
+    temp
 }
 
 pub fn process<'a>(buf: &'a [u8], len: usize) -> Stations<'a> {
@@ -198,21 +226,13 @@ pub fn process<'a>(buf: &'a [u8], len: usize) -> Stations<'a> {
     let mut mph: Vec<Station> = vec![Station::default(); MPH_SIZE];
     let mut stations = HashMap::<&'a [u8], Station, BuildHasherDefault<PerfectHash>>::default();
 
-    let mut i = 0;
-    while i < len {
-        let name_idx = i;
-        let Name {
-            prefix,
-            name_len,
-            hash,
-        } = read_name(&buf[name_idx..]);
-        i += name_len + 1;
-
-        let (temp, temp_len) = read_temp(&buf[i..]);
-        i += temp_len + 1;
+    let mut rdr = Reader::new(buf);
+    while rdr.i < len {
+        let Name { prefix, name, hash } = read_name(&mut rdr);
+        let temp = read_temp(&mut rdr);
 
         // Try storing in minimal perfect hash table
-        if name_len <= 26 {
+        if name.len() <= 26 {
             let idx = hash.index();
             if prefix == mph_data.keys[idx] {
                 mph[idx].update(temp);
@@ -221,7 +241,7 @@ pub fn process<'a>(buf: &'a [u8], len: usize) -> Stations<'a> {
         }
         // Fallback to general hashmap
         stations
-            .entry(&buf[name_idx..name_idx + name_len])
+            .entry(name)
             .and_modify(|station| station.update(temp))
             .or_insert(Station::new(temp));
     }
@@ -238,8 +258,10 @@ pub fn process<'a>(buf: &'a [u8], len: usize) -> Stations<'a> {
 
 #[cfg(test)]
 mod tests {
+    use std::{fs::File, path::Path};
+
     use super::*;
-    use crate::test;
+    use crate::{mmap, test, BUF_EXCESS};
 
     #[test]
     fn test_correctness() {
@@ -272,5 +294,47 @@ mod tests {
         assert_eq!(parse(b"-1.2"), -12);
         assert_eq!(parse(b"12.3"), 123);
         assert_eq!(parse(b"-12.3"), -123);
+    }
+
+    #[test]
+    fn test_reader() {
+        let (mmap, _len) = mmap::<BUF_EXCESS>(
+            &File::open(
+                Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("tests")
+                    .join("measurements-10.txt"),
+            )
+            .unwrap(),
+        );
+        let mut rdr = Reader::new(&mmap);
+        assert_eq!(
+            std::str::from_utf8(&rdr.read16().to_le_bytes()).unwrap(),
+            "Halifax;12.9\nZag"
+        );
+        rdr.advance(8);
+        assert_eq!(
+            std::str::from_utf8(&rdr.read8().to_le_bytes()).unwrap(),
+            "12.9\nZag"
+        );
+        rdr.advance(5);
+        assert_eq!(
+            std::str::from_utf8(&rdr.read16().to_le_bytes()).unwrap(),
+            "Zagreb;12.2\nCabo"
+        );
+        rdr.advance(7);
+        assert_eq!(
+            std::str::from_utf8(&rdr.read8().to_le_bytes()).unwrap(),
+            "12.2\nCab"
+        );
+        rdr.advance(5);
+        assert_eq!(
+            std::str::from_utf8(&rdr.read16().to_le_bytes()).unwrap(),
+            "Cabo San Lucas;1"
+        );
+        rdr.advance(16);
+        assert_eq!(
+            std::str::from_utf8(&rdr.read16().to_le_bytes()).unwrap(),
+            "4.9\nAdelaide;15."
+        );
     }
 }
