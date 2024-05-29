@@ -7,7 +7,7 @@ fn main() {
     let file = File::open(measurements_path).unwrap();
     let (mmap, len) = mmap::<BUF_EXCESS>(&file);
 
-    let stations = cpu::opt07::process(&mmap[..], len);
+    let stations = cpu::opt08::process(&mmap[..], len);
 
     println!("{}", stations);
 }
