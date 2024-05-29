@@ -1,6 +1,4 @@
 #![feature(portable_simd)]
-#![feature(hash_raw_entry)]
-#![feature(pointer_is_aligned_to)]
 
 pub mod cpu;
 pub mod gpu_baseline;
