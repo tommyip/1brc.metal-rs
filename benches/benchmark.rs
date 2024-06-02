@@ -51,6 +51,7 @@ pub fn benchmark(c: &mut Criterion) {
         bench!(cpu::opt06);
         bench!(cpu::opt07);
         bench!(cpu::opt08);
+        bench!(cpu::opt09);
     }
 
     group.finish();

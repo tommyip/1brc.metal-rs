@@ -1,4 +1,4 @@
-#![feature(portable_simd)]
+#![feature(portable_simd, pointer_is_aligned_to, array_chunks, test)]
 
 pub mod cpu;
 pub mod gpu_baseline;

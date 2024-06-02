@@ -1,10 +1,10 @@
 #![allow(dead_code)]
 #![feature(portable_simd)]
 
-use std::{collections::HashSet, fmt, ops::BitXor};
+use std::{collections::HashSet, fmt, mem::transmute, ops::BitXor};
 
 use one_billion_row::STATION_NAMES;
-use ptr_hash::hash::Hasher;
+use ptr_hash::{hash::Hasher, DefaultPtrHash, PtrHash, PtrHashParams};
 
 fn name_len_stats() {
     let n_gt_8 = STATION_NAMES.iter().filter(|name| name.len() > 8).count();
@@ -25,6 +25,16 @@ fn name_len_stats() {
         max_len,
     );
     println!("names with unicode prefix: {:?}", unicode_prefix);
+    for len in 1..32 {
+        let uniques = STATION_NAMES
+            .map(|name| &name.as_bytes()[..name.len().min(len)])
+            .into_iter()
+            .collect::<HashSet<_>>();
+        if uniques.len() == STATION_NAMES.len() {
+            println!("Min unique len {}", len);
+            break;
+        }
+    }
 }
 
 fn min_prefix() {
@@ -42,45 +52,6 @@ fn min_prefix() {
             break;
         }
     }
-}
-
-fn djbx33a(s: &[u8]) -> u64 {
-    s.iter()
-        .fold(5381, |h, c| h.wrapping_mul(33).wrapping_add(*c as u64))
-}
-
-fn djbx33a_x4(s: &[u8]) -> u64 {
-    let mut chunks = s.chunks_exact(4);
-    let mut h = [5381u64, 5381, 5381, 5381];
-    while let Some(chunk) = chunks.next() {
-        for i in 0..4 {
-            h[i] = h[i].wrapping_mul(33).wrapping_add(chunk[i] as u64);
-        }
-    }
-    for (i, &c) in chunks.remainder().iter().enumerate() {
-        h[i] = h[i].wrapping_mul(33).wrapping_add(c as u64);
-    }
-    h[0] ^ h[1] ^ h[2] ^ h[3]
-}
-
-fn djbx33a_u64(s: &[u8]) -> u64 {
-    let mut h: u64 = 5381;
-    for chunk in s.chunks(8) {
-        let mut buf = [0u8; 8];
-        buf[..chunk.len()].copy_from_slice(chunk);
-        h = h.wrapping_mul(33).wrapping_add(u64::from_le_bytes(buf));
-    }
-    h
-}
-
-fn djbx33a_u64_parametric(s: &[u8], seed: u64, mul: u64) -> u64 {
-    let mut h = seed;
-    for chunk in s.chunks(8) {
-        let mut buf = [0u8; 8];
-        buf[..chunk.len()].copy_from_slice(chunk);
-        h = h.wrapping_mul(mul).wrapping_add(u64::from_le_bytes(buf));
-    }
-    h
 }
 
 #[derive(Clone)]
@@ -102,6 +73,45 @@ impl Hasher<&str> for FxHash {
             h = h.rotate_left(5).bitxor(i).wrapping_mul(Self::K);
         }
         h
+    }
+}
+
+#[derive(Clone)]
+struct AESHasher;
+
+impl Hasher<&str> for AESHasher {
+    type H = u64;
+
+    fn hash(x: &&str, _seed: u64) -> Self::H {
+        use std::arch::aarch64::*;
+        let mut buf = [0u8; 32];
+        buf[..x.len()].copy_from_slice(x.as_bytes());
+        unsafe {
+            let data = vld1q_u8(buf.as_ptr());
+            let key = vld1q_u8(buf.as_ptr().add(8));
+            let aes = vaeseq_u8(data, key);
+            let aes_u64x2 = vreinterpretq_u64_u8(aes);
+            let aes_lo = vgetq_lane_u64(aes_u64x2, 0) as u64;
+            let aes_hi = vgetq_lane_u64(aes_u64x2, 1) as u64;
+            aes_lo.wrapping_mul(aes_hi)
+        }
+    }
+}
+
+#[derive(Clone)]
+struct CCHasher;
+
+impl Hasher<&str> for CCHasher {
+    type H = u64;
+
+    fn hash(x: &&str, _seed: u64) -> Self::H {
+        let mut chunk =
+            u64::from_le_bytes(unsafe { *transmute::<*const u8, &[u8; 8]>(x.as_ptr()) });
+        if x.len() < 8 {
+            let mask = (1 << (x.len() << 3)) - 1;
+            chunk &= mask;
+        }
+        (chunk ^ x.len() as u64).wrapping_mul(FxHash::K)
     }
 }
 
@@ -167,84 +177,27 @@ fn ptrhash(hash: u64) -> usize {
         & ((1 << 9) - 1) as usize;
 }
 
-#[derive(Clone)]
-enum Key<'a> {
-    Inline([u8; 16]),
-    Str(&'a [u8]),
-}
-
 fn main() {
-    println!(
-        "{} {}",
-        std::mem::align_of::<u128>(),
-        std::mem::align_of::<[u64; 2]>()
-    );
-    // let buf = u8x16::from_slice(b"abcdefghixxxxxxx;hijklidsfjakldsfjkadsfd");
-    // let mask = buf.simd_eq(u8x16::splat(b';'));
-    // if let Some(name_len) = mask.first_set() {
-    //     let word: &u128 = unsafe { std::mem::transmute(&buf) };
-    //     let shift = (16 - name_len) * 8;
-    //     let word_masked = (word << shift) >> shift;
-    //     let masked_buf = word_masked.to_ne_bytes();
-    //     println!("{}", std::str::from_utf8(&masked_buf).unwrap());
-    // }
+    let params = PtrHashParams {
+        alpha: 0.9,
+        c: 1.5,
+        slots_per_part: STATION_NAMES.len() * 2,
+        ..Default::default()
+    };
+    let mphf: PtrHash<&str, ptr_hash::local_ef::LocalEf, CCHasher> =
+        DefaultPtrHash::new(&STATION_NAMES, params);
 
-    // let params = PtrHashParams {
-    //     alpha: 0.9,
-    //     c: 1.5,
-    //     slots_per_part: STATION_NAMES.len() * 2,
-    //     ..Default::default()
-    // };
-    // let mphf: PtrHash<&str, ptr_hash::local_ef::LocalEf, FxHash> =
-    //     DefaultPtrHash::new(&STATION_NAMES, params);
+    println!("{}", mphf.index(&"Hong Kong"));
+    // // ptrhash(FxHash::hash(&"Hong Kong", 0));
 
-    // println!("{}", mphf.index(&"Hong Kong"));
-    // ptrhash(FxHash::hash(&"Hong Kong", 0));
+    let mut taken = vec![false; 512];
+    for name in STATION_NAMES {
+        let ref_idx = mphf.index(&name);
+        // let idx = ptrhash(FxHash::hash(&name, 0));
+        // assert_eq!(ref_idx, idx);
+        assert!(!taken[ref_idx]);
+        taken[ref_idx] = true;
+    }
 
-    // let mut taken = vec![false; 512];
-    // for name in STATION_NAMES {
-    //     let ref_idx = mphf.index(&name);
-    //     let idx = ptrhash(FxHash::hash(&name, 0));
-    //     assert_eq!(ref_idx, idx);
-    //     assert!(!taken[ref_idx]);
-    //     taken[ref_idx] = true;
-    // }
-
-    // println!(
-    //     "{}",
-    //     STATION_NAMES.map(|x| x.len()).into_iter().max().unwrap()
-    // );
-
-    // let global_len = 10_000;
-    // let threadgroup_len = 1_365;
-    // println!("Total names: {}", STATION_NAMES.len());
     name_len_stats();
-    // min_prefix();
-
-    // println!(
-    //     "djbx33a(buckets={}): {}",
-    //     global_len,
-    //     statistics(djbx33a, global_len)
-    // );
-    // println!(
-    //     "djbx33a(buckets={}): {}",
-    //     threadgroup_len,
-    //     statistics(djbx33a, threadgroup_len)
-    // );
-    // println!(
-    //     "djbx33a_x4(buckets={}): {}",
-    //     global_len,
-    //     statistics(djbx33a_x4, global_len)
-    // );
-    // println!(
-    //     "djbx33a_x4(buckets={}): {}",
-    //     threadgroup_len,
-    //     statistics(djbx33a_x4, threadgroup_len)
-    // );
-    // println!(
-    //     "djbx33a_u64(buckets={}): {}",
-    //     1024,
-    //     statistics(djbx33a_u64, threadgroup_len)
-    // );
-    // find_perfect_hash(1024);
 }
