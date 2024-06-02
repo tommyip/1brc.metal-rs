@@ -160,10 +160,10 @@ where
 fn ptrhash(hash: u64) -> usize {
     const C: u64 = 0x517cc1b727220a95;
     let pilots: Vec<u8> = vec![
-        50, 110, 71, 13, 18, 27, 21, 14, 10, 16, 1, 14, 6, 11, 0, 2, 17, 2, 1, 4, 68, 79, 21, 0,
-        22, 20, 60, 12, 30, 53, 62, 78, 27, 17, 2, 17, 13, 43, 21, 108, 19, 12, 25, 1, 55, 36, 1,
-        0, 4, 184, 0, 21, 69, 25, 13, 177, 11, 97, 3, 29, 14, 104, 30, 4, 50, 23, 6, 102, 137, 10,
-        227, 32, 29, 21, 7, 4, 244, 0,
+        0, 21, 32, 6, 13, 20, 13, 4, 2, 0, 47, 6, 3, 2, 4, 28, 1, 17, 24, 31, 23, 15, 37, 0, 42,
+        39, 22, 1, 1, 24, 0, 6, 59, 0, 0, 30, 10, 46, 0, 7, 38, 28, 46, 23, 60, 14, 12, 23, 0, 56,
+        43, 15, 165, 30, 138, 46, 25, 14, 180, 0, 42, 72, 6, 99, 46, 0, 125, 39, 75, 94, 70, 47,
+        245, 7, 55, 41, 237, 0,
     ];
     let rem_c1: u64 = 38;
     let rem_c2: u64 = 132;
@@ -188,11 +188,13 @@ fn main() {
         DefaultPtrHash::new(&STATION_NAMES, params);
 
     println!("{}", mphf.index(&"Hong Kong"));
-    // // ptrhash(FxHash::hash(&"Hong Kong", 0));
+    ptrhash(FxHash::hash(&"Hong Kong", 0));
 
     let mut taken = vec![false; 512];
     for name in STATION_NAMES {
-        let ref_idx = mphf.index(&name);
+        let hash = CCHasher::hash(&name, 0);
+        let ref_idx = ptrhash(hash);
+        // let ref_idx = mphf.index(&name);
         // let idx = ptrhash(FxHash::hash(&name, 0));
         // assert_eq!(ref_idx, idx);
         assert!(!taken[ref_idx]);

@@ -11,7 +11,10 @@ use std::{
 use crate::{Station, Stations, STATION_NAMES};
 
 const MPH_SIZE: usize = 512;
-const PREFIX_SIZE_U64: usize = 4;
+
+fn neon_load_u8x32(s: &[u8]) -> uint8x16x2_t {
+    unsafe { vld1q_u8_x2(s.as_ptr()) }
+}
 
 /// Branchless ; and \n search with SIMD
 ///
@@ -119,27 +122,49 @@ impl<'a> Iterator for LineIter<'a> {
     }
 }
 
-fn mask_prefix(name: &[u8]) -> [u64; 4] {
-    match name.len() {
-        0..8 => {
-            let p0 =
-                u64::from_le_bytes(unsafe { *transmute::<*const u8, &[u8; 8]>(name.as_ptr()) });
-            let mask = (1 << (name.len() * 8)) - 1;
-            [p0 & mask, 0, 0, 0]
+struct Name<'a> {
+    value: &'a [u8],
+    /// 32-bytes prefix of name (trailing bytes not masked)
+    nomask_32: uint8x16x2_t,
+    /// 8-bytes prefix of name (trailing bytes masked)
+    masked_8: u64,
+}
+
+impl<'a> Name<'a> {
+    fn new(value: &'a [u8]) -> Self {
+        Self {
+            value,
+            nomask_32: neon_load_u8x32(value),
+            masked_8: Self::load_masked8(value),
         }
-        8..16 => {
-            let p01 =
-                u128::from_le_bytes(unsafe { *transmute::<*const u8, &[u8; 16]>(name.as_ptr()) });
-            let mask = (1 << ((name.len() % 8) * 8)) - 1;
-            [p01 as u64, (p01 >> 64) as u64 & mask, 0, 0]
+    }
+
+    fn load_masked8(name: &[u8]) -> u64 {
+        let mut x = u64::from_le_bytes(unsafe { *transmute::<*const u8, &[u8; 8]>(name.as_ptr()) });
+        if name.len() < 8 {
+            x &= (1 << (name.len() << 3)) - 1;
         }
-        16..32 => {
-            let mut prefix = [0u64; 4];
-            let bytes: &mut [u8; 32] = unsafe { transmute(&mut prefix) };
-            bytes[..name.len()].copy_from_slice(name);
-            prefix
-        }
-        _ => [0u64; 4],
+        x
+    }
+
+    /// Byte equality for up to 32 bytes prefix of station name
+    ///
+    /// We simply check the number of matching bytes is equal to the expected length. `expected`
+    /// have trailing bytes padded with `0x1` which means that no `actual` bytes should match these
+    /// padding bytes. While the official rules allow the name to contain any UTF-8 characters
+    /// except `;` and `\n`, it would be pretty Bobby Tables for a city to have `0x1` (Start of
+    /// heading) in its name. We don't use `0x0` for padding since that is used by the mmap trailer.
+    fn neon_equal(&self, expected: uint8x16x2_t, expected_len: u32) -> bool {
+        let matching_bytes = unsafe {
+            let v_mask0 = vreinterpretq_u16_u8(vceqq_u8(self.nomask_32.0, expected.0));
+            let v_mask1 = vreinterpretq_u16_u8(vceqq_u8(self.nomask_32.1, expected.1));
+            let v_mask0_shrn = vshrn_n_u16(v_mask0, 4);
+            let v_mask1_shrn = vshrn_n_u16(v_mask1, 4);
+            let mask0 = vget_lane_u64(vreinterpret_u64_u8(v_mask0_shrn), 0);
+            let mask1 = vget_lane_u64(vreinterpret_u64_u8(v_mask1_shrn), 0);
+            (mask0.count_ones() + mask1.count_ones()) >> 2
+        };
+        matching_bytes == expected_len
     }
 }
 
@@ -170,6 +195,7 @@ impl Hasher for FxHash {
         if !bytes.is_empty() {
             let x =
                 u64::from_le_bytes(unsafe { *transmute::<*const u8, &[u8; 8]>(bytes.as_ptr()) });
+            let x = x & (1 << (bytes.len() << 3)) - 1;
             self.write_u64(x);
         }
     }
@@ -181,8 +207,9 @@ impl Hasher for FxHash {
 /// Credit: Ragnar Groot Koerkamp
 /// https://curiouscoding.nl/posts/1brc/#inline-hash-keys-50s
 fn cc_hash(prefix: u64, len: usize) -> u64 {
-    // While $prefix ⊕ len$ gives us unique hashes, its distribution is poor. To make
-    // it work with PTRHash, we additionally multiply it with a large constant.
+    // While $prefix ⊕ len$ gives us unique hashes, its distribution is poor.
+    // To make it work with PTRHash to find a minimal perfect hashmap, we
+    // additionally multiply it with a large constant.
     (prefix ^ len as u64).wrapping_mul(FxHash::K)
 }
 
@@ -219,23 +246,21 @@ fn mph_index(hash: u64) -> usize {
 
 struct PerfectHashData {
     /// Station names matching MPH bucket indices
-    keys: [[u64; PREFIX_SIZE_U64]; MPH_SIZE],
+    keys: [([u8; 32], u32); MPH_SIZE],
     /// Map bucket to STATION_NAMES
     indices: [usize; MPH_SIZE],
 }
 
 impl PerfectHashData {
     fn new() -> Self {
-        let mut keys = [[0; 4]; MPH_SIZE];
+        let mut keys = [([0x1; 32], 0); MPH_SIZE];
         let mut indices = [0; MPH_SIZE];
         for (i, name) in STATION_NAMES.into_iter().enumerate() {
-            let mut prefix = [0u8; 8];
-            let prefix_len = name.len().min(8);
-            prefix[..prefix_len].copy_from_slice(&name.as_bytes()[..prefix_len]);
-            let prefix = u64::from_le_bytes(prefix);
+            let prefix = Name::load_masked8(name.as_bytes());
             let idx = mph_index(cc_hash(prefix, name.len()));
-            let bucket: &mut [u8; 32] = unsafe { transmute(&mut keys[idx]) };
+            let (bucket, len) = &mut keys[idx];
             bucket[..name.len()].copy_from_slice(name.as_bytes());
+            *len = name.len() as u32;
             indices[idx] = i;
         }
         Self { keys, indices }
@@ -260,16 +285,16 @@ impl<'a> Records<'a> {
         }
     }
 
-    fn insert(&mut self, name: &'a [u8], prefix: [u64; 4], temp: i16) {
-        if name.len() <= 26 {
-            let idx = mph_index(cc_hash(prefix[0], name.len()));
-            if prefix == self.mph_data.keys[idx] {
-                self.mph[idx].update(temp);
-                return;
-            }
+    fn insert(&mut self, name: Name<'a>, temp: i16) {
+        let idx = mph_index(cc_hash(name.masked_8, name.value.len()));
+        let &(ref key, len) = &self.mph_data.keys[idx];
+        let bucket_prefix = neon_load_u8x32(&key[..]);
+        if len > 0 && name.neon_equal(bucket_prefix, len as u32) {
+            self.mph[idx].update(temp);
+            return;
         }
         self.fallback
-            .entry(name)
+            .entry(name.value)
             .and_modify(|station| station.update(temp))
             .or_insert(Station::new(temp));
     }
@@ -292,8 +317,8 @@ pub fn process<'a>(buf: &'a [u8], len: usize) -> Stations<'a> {
 
     for line in LineIter::new(buf, 0, len) {
         let temp = swar_parse_temp(line.temp, line.temp_len);
-        let prefix = mask_prefix(line.name);
-        records.insert(line.name, prefix, temp);
+        let name = Name::new(line.name);
+        records.insert(name, temp);
     }
 
     records.finish()
@@ -371,6 +396,17 @@ mod tests {
             matches &= matches - 1;
         }
         assert_eq!(vec![0, 3, 9, 10, 15], indices);
+    }
+
+    #[test]
+    fn test_neon_name_equal() {
+        let name0 = Name::new(b"abcdefghijk                     ");
+        let name1 = Name::new(b"abcdefghijz                     ");
+        let name2 = Name::new(b"abcdefghi                       ");
+        let expected = neon_load_u8x32(b"abcdefghijk\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0");
+        assert!(name0.neon_equal(expected, 11));
+        assert!(!name1.neon_equal(expected, 11));
+        assert!(!name2.neon_equal(expected, 11));
     }
 
     #[bench]
