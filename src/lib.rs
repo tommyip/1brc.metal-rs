@@ -446,17 +446,6 @@ pub fn c_void<T>(value_ref: &T) -> *const ffi::c_void {
     (value_ref as *const T) as *const ffi::c_void
 }
 
-/// https://stackoverflow.com/a/28124775
-fn round_to_positive(x: f32) -> f32 {
-    let y = x.floor();
-    if x == y {
-        x
-    } else {
-        let z = (2.0 * x - y).floor();
-        z.copysign(x)
-    }
-}
-
 #[derive(Copy, Clone)]
 pub struct Station {
     min: i16,
@@ -518,7 +507,7 @@ impl fmt::Display for Station {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let min = self.min as f32 / 10.;
         let max = self.max as f32 / 10.;
-        let mean = round_to_positive(((self.sum as f32 / 10.) / self.count as f32) * 10.) / 10.;
+        let mean = ((self.sum as f64 / 10. / self.count as f64) * 10.).round() / 10.;
         f.write_fmt(format_args!("{:.1}/{:.1}/{:.1}", min, mean, max))
     }
 }
