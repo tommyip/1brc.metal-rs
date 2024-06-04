@@ -23,15 +23,21 @@ fn neon_load_u8x32(s: &[u8]) -> uint8x16x2_t {
 /// This does not give any performance uplifts compared to the SWAR version by itself, but:
 /// 1. Return value is u64 so counting trailing zeros is cheaper than u128
 /// 2. Use SIMD registers to free up general registers
-fn neon_find_delimiters(chunk: uint8x16_t) -> u64 {
+fn neon_find_delimiters(chunk: uint8x16x2_t) -> u64 {
     let matches = unsafe {
-        let eq_semi = vceqq_u8(chunk, vdupq_n_u8(b';'));
-        let eq_newline = vceqq_u8(chunk, vdupq_n_u8(b'\n'));
-        let eq_mask = vreinterpretq_u16_u8(vorrq_u8(eq_semi, eq_newline));
-        let res = vshrn_n_u16(eq_mask, 4);
-        vget_lane_u64(vreinterpret_u64_u8(res), 0)
+        let v_semi0 = vceqq_u8(chunk.0, vdupq_n_u8(b';'));
+        let v_newline0 = vceqq_u8(chunk.0, vdupq_n_u8(b'\n'));
+        let v_semi1 = vceqq_u8(chunk.1, vdupq_n_u8(b';'));
+        let v_newline1 = vceqq_u8(chunk.1, vdupq_n_u8(b'\n'));
+        let v_01234567 = vreinterpretq_u16_u8(vorrq_u8(v_semi0, v_newline0));
+        let v_abcdefgh = vreinterpretq_u16_u8(vorrq_u8(v_semi1, v_newline1));
+        let uint16x8x2_t(v_0246aceg, v_1357bdfh) = vuzpq_u16(v_01234567, v_abcdefgh);
+        let v_a6b2 = vshrn_n_u16(v_0246aceg, 6);
+        let v_c6d2 = vshrn_n_u16(v_1357bdfh, 6);
+        let v_aabbccdd = vsli_n_u8(v_a6b2, v_c6d2, 4);
+        vget_lane_u64(vreinterpret_u64_u8(v_aabbccdd), 0)
     };
-    matches & 0x8888888888888888
+    matches & 0xAAAAAAAAAAAAAAAA
 }
 
 /// `temp_len` is the number of bytes of between ; and \n (ie |temp| + 1)
@@ -66,11 +72,11 @@ struct LineIter<'a> {
 impl<'a> LineIter<'a> {
     fn new(buf: &'a [u8], i: usize, end: usize) -> Self {
         assert!(buf.as_ptr().is_aligned_to(16));
-        let chunk_i = (i / 16) * 16;
-        let chunk = unsafe { vld1q_u8(buf.as_ptr().add(chunk_i)) };
+        let chunk_i = (i / 32) * 32;
+        let chunk = unsafe { vld1q_u8_x2(buf.as_ptr().add(chunk_i)) };
         let mask = {
             let mask = neon_find_delimiters(chunk);
-            let offset = (i % 16) << 2;
+            let offset = (i % 32) << 1;
             mask & (u64::MAX << offset)
         };
         Self {
@@ -89,11 +95,11 @@ impl<'a> LineIter<'a> {
     /// Return (name, temp index, semicolon offset in 16-byte chunk)
     fn next_name(&mut self) -> (&'a [u8], u32) {
         while self.mask == 0 {
-            self.chunk_i += 16;
-            let chunk = self.neon_load_u8x16(self.chunk_i);
+            self.chunk_i += 32;
+            let chunk = self.neon_load_u8x16x2(self.chunk_i);
             self.mask = neon_find_delimiters(chunk);
         }
-        let semi_offset = self.mask.trailing_zeros() >> 2;
+        let semi_offset = self.mask.trailing_zeros() >> 1;
         self.mask &= self.mask - 1;
         let semi_pos = self.chunk_i + semi_offset as usize;
         let name = &self.buf[self.i..semi_pos];
@@ -104,13 +110,13 @@ impl<'a> LineIter<'a> {
     /// Find number of bytes between semicolon and newline (4..=6)
     fn next_temp_len(&mut self, semi_offset: u32) -> u32 {
         let temp_len = if self.mask == 0 {
-            self.chunk_i += 16;
-            let chunk = self.neon_load_u8x16(self.chunk_i);
+            self.chunk_i += 32;
+            let chunk = self.neon_load_u8x16x2(self.chunk_i);
             self.mask = neon_find_delimiters(chunk);
-            let lf_offset = self.mask.trailing_zeros() >> 2;
-            16 - semi_offset + lf_offset
+            let lf_offset = self.mask.trailing_zeros() >> 1;
+            32 - semi_offset + lf_offset
         } else {
-            let lf_offset = self.mask.trailing_zeros() >> 2;
+            let lf_offset = self.mask.trailing_zeros() >> 1;
             lf_offset - semi_offset
         };
         self.mask &= self.mask - 1;
@@ -136,8 +142,8 @@ impl<'a> LineIter<'a> {
         }
     }
 
-    fn neon_load_u8x16(&self, i: usize) -> uint8x16_t {
-        unsafe { vld1q_u8(self.buf.as_ptr().add(i)) }
+    fn neon_load_u8x16x2(&self, i: usize) -> uint8x16x2_t {
+        unsafe { vld1q_u8_x2(self.buf.as_ptr().add(i)) }
     }
 }
 
@@ -470,18 +476,19 @@ mod tests {
 
     #[test]
     fn test_neon_find_delimiters() {
-        let s = b";bc\ndefgh;\n0123;5678";
+        let s = b";bc\ndefgh;\n0123;5678\n;123;;\n\n12;";
         let mut matches = unsafe {
-            let chunk = aarch64::vld1q_u8(s.as_ptr());
+            let chunk = aarch64::vld1q_u8_x2(s.as_ptr());
             neon_find_delimiters(chunk)
         };
+        println!("{:064b}", matches);
         let mut indices = vec![];
         while matches != 0 {
-            let i = matches.trailing_zeros() >> 2;
+            let i = matches.trailing_zeros() >> 1;
             indices.push(i);
             matches &= matches - 1;
         }
-        assert_eq!(vec![0, 3, 9, 10, 15], indices);
+        assert_eq!(vec![0, 3, 9, 10, 15, 20, 21, 25, 26, 27, 28, 31], indices);
     }
 
     #[test]
@@ -507,33 +514,34 @@ mod tests {
             diff.wrapping_sub(broadcast(0x01)) & (!diff & broadcast(0x80))
         }
 
-        #[repr(align(16))]
+        #[repr(align(32))]
         struct Aligned {
-            bytes: [u8; 16],
+            bytes: [u8; 32],
         }
         let s = Aligned {
-            bytes: *b";bc\ndefgh;\n0123;",
+            bytes: *b";bc\ndefgh;\n0123;;bc\ndefgh;\n0123;",
         };
         b.iter(|| {
             for _ in 0..black_box(1000) {
-                let chunk = unsafe { transmute::<&[u8; 16], &[u128; 1]>(&s.bytes) }[0];
-                black_box(swar_find_delimiters(chunk));
+                let chunk = unsafe { transmute::<&[u8; 32], &[u128; 2]>(&s.bytes) };
+                black_box(swar_find_delimiters(chunk[0]));
+                black_box(swar_find_delimiters(chunk[0]));
             }
         });
     }
 
     #[bench]
     fn bench_neon_find_delimiters(b: &mut Bencher) {
-        #[repr(align(16))]
+        #[repr(align(32))]
         struct Aligned {
-            bytes: [u8; 16],
+            bytes: [u8; 32],
         }
         let s = Aligned {
-            bytes: *b";bc\ndefgh;\n0123;",
+            bytes: *b";bc\ndefgh;\n0123;;bc\ndefgh;\n0123;",
         };
         b.iter(|| unsafe {
             for _ in 0..black_box(1000) {
-                let chunk = aarch64::vld1q_u8(s.bytes.as_ptr());
+                let chunk = aarch64::vld1q_u8_x2(s.bytes.as_ptr());
                 black_box(neon_find_delimiters(chunk));
             }
         });
