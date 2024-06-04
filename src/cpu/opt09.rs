@@ -45,6 +45,16 @@ fn swar_parse_temp(chars: i64, temp_len: u32) -> i16 {
     ((abs_value as i64 ^ sign) - sign) as i16
 }
 
+fn next_line(buf: &[u8], i: usize) -> usize {
+    i + buf[i..].into_iter().position(|&b| b == b'\n').unwrap() + 1
+}
+
+struct Line<'a> {
+    name: &'a [u8],
+    temp: i64,     // a slice of 8 bytes starting at the beginning of the temperature
+    temp_len: u32, // number of bytes between semicolon and newline (4..=6)
+}
+
 struct LineIter<'a> {
     buf: &'a [u8],
     mask: u64,
@@ -56,36 +66,28 @@ struct LineIter<'a> {
 impl<'a> LineIter<'a> {
     fn new(buf: &'a [u8], i: usize, end: usize) -> Self {
         assert!(buf.as_ptr().is_aligned_to(16));
-        let mask = neon_find_delimiters(unsafe { vld1q_u8(buf.as_ptr()) });
+        let chunk_i = (i / 16) * 16;
+        let chunk = unsafe { vld1q_u8(buf.as_ptr().add(chunk_i)) };
+        let mask = {
+            let mask = neon_find_delimiters(chunk);
+            let offset = (i % 16) << 2;
+            mask & (u64::MAX << offset)
+        };
         Self {
             buf,
             mask,
-            chunk_i: 0,
+            chunk_i,
             i,
             end,
         }
     }
 
-    fn neon_load_u8x16(&self, i: usize) -> uint8x16_t {
-        unsafe { vld1q_u8(self.buf.as_ptr().add(i)) }
+    fn is_empty(&self) -> bool {
+        self.i >= self.end
     }
-}
 
-struct Line<'a> {
-    name: &'a [u8],
-    temp: i64,     // a slice of 8 bytes starting at the beginning of the temperature
-    temp_len: u32, // number of bytes between semicolon and newline (4..=6)
-}
-
-impl<'a> Iterator for LineIter<'a> {
-    type Item = Line<'a>;
-
-    #[inline]
-    fn next(&mut self) -> Option<Self::Item> {
-        if self.i == self.end {
-            return None;
-        }
-
+    /// Return (name, temp index, semicolon offset in 16-byte chunk)
+    fn next_name(&mut self) -> (&'a [u8], u32) {
         while self.mask == 0 {
             self.chunk_i += 16;
             let chunk = self.neon_load_u8x16(self.chunk_i);
@@ -94,7 +96,13 @@ impl<'a> Iterator for LineIter<'a> {
         let semi_offset = self.mask.trailing_zeros() >> 2;
         self.mask &= self.mask - 1;
         let semi_pos = self.chunk_i + semi_offset as usize;
+        let name = &self.buf[self.i..semi_pos];
+        self.i = semi_pos + 1;
+        (name, semi_offset)
+    }
 
+    /// Find number of bytes between semicolon and newline (4..=6)
+    fn next_temp_len(&mut self, semi_offset: u32) -> u32 {
         let temp_len = if self.mask == 0 {
             self.chunk_i += 16;
             let chunk = self.neon_load_u8x16(self.chunk_i);
@@ -106,19 +114,39 @@ impl<'a> Iterator for LineIter<'a> {
             lf_offset - semi_offset
         };
         self.mask &= self.mask - 1;
+        self.i += temp_len as usize;
+        temp_len
+    }
 
-        let name = &self.buf[self.i..semi_pos];
-        let temp = i64::from_le_bytes(unsafe {
-            *transmute::<*const u8, &[u8; 8]>(self.buf[semi_pos + 1..].as_ptr())
-        });
+    /// Read the 8-byte slice containing the temperature string but not parse it
+    fn read_temp_str(&self) -> i64 {
+        i64::from_le_bytes(unsafe {
+            *transmute::<*const u8, &[u8; 8]>(self.buf[self.i..].as_ptr())
+        })
+    }
 
-        self.i = semi_pos + temp_len as usize + 1;
-
-        Some(Self::Item {
+    fn next_unchecked(&mut self) -> Line<'a> {
+        let (name, semi_offset) = self.next_name();
+        let temp = self.read_temp_str();
+        let temp_len = self.next_temp_len(semi_offset);
+        Line {
             name,
             temp,
             temp_len,
-        })
+        }
+    }
+
+    fn neon_load_u8x16(&self, i: usize) -> uint8x16_t {
+        unsafe { vld1q_u8(self.buf.as_ptr().add(i)) }
+    }
+}
+
+impl<'a> Iterator for LineIter<'a> {
+    type Item = Line<'a>;
+
+    #[inline]
+    fn next(&mut self) -> Option<Self::Item> {
+        (!self.is_empty()).then(|| self.next_unchecked())
     }
 }
 
@@ -147,22 +175,25 @@ impl<'a> Name<'a> {
         x
     }
 
+    fn mph_idx(&self) -> usize {
+        mph_index(cc_hash(self.masked_8, self.value.len()))
+    }
+
     /// Byte equality for up to 32 bytes prefix of station name
     ///
     /// We simply check the number of matching bytes is equal to the expected length. `expected`
-    /// have trailing bytes padded with `0x1` which means that no `actual` bytes should match these
-    /// padding bytes. While the official rules allow the name to contain any UTF-8 characters
-    /// except `;` and `\n`, it would be pretty Bobby Tables for a city to have `0x1` (Start of
-    /// heading) in its name. We don't use `0x0` for padding since that is used by the mmap trailer.
-    fn neon_equal(&self, expected: uint8x16x2_t, expected_len: u32) -> bool {
+    /// have trailing bytes padded with `0xFF` which means that no `actual` bytes should match these
+    /// padding bytes. We don't use `0x0` for padding since that is used by the mmap trailer.
+    fn neon_equal(&self, expected: &[u8; 32], expected_len: u32) -> bool {
         let matching_bytes = unsafe {
-            let v_mask0 = vreinterpretq_u16_u8(vceqq_u8(self.nomask_32.0, expected.0));
-            let v_mask1 = vreinterpretq_u16_u8(vceqq_u8(self.nomask_32.1, expected.1));
-            let v_mask0_shrn = vshrn_n_u16(v_mask0, 4);
-            let v_mask1_shrn = vshrn_n_u16(v_mask1, 4);
-            let mask0 = vget_lane_u64(vreinterpret_u64_u8(v_mask0_shrn), 0);
-            let mask1 = vget_lane_u64(vreinterpret_u64_u8(v_mask1_shrn), 0);
-            (mask0.count_ones() + mask1.count_ones()) >> 2
+            let expected = vld1q_u8_x2(expected.as_ptr());
+            let v_a8b8 = vceqq_u8(self.nomask_32.0, expected.0);
+            let v_c8d8 = vceqq_u8(self.nomask_32.1, expected.1);
+            let v_a6b2 = vshrn_n_u16(vreinterpretq_u16_u8(v_a8b8), 6);
+            let v_c6d2 = vshrn_n_u16(vreinterpretq_u16_u8(v_c8d8), 6);
+            let v_aabbccdd = vsli_n_u8(v_a6b2, v_c6d2, 4);
+            let aabbccdd = vget_lane_u64(vreinterpret_u64_u8(v_aabbccdd), 0);
+            aabbccdd.count_ones() >> 1
         };
         matching_bytes == expected_len
     }
@@ -253,7 +284,7 @@ struct PerfectHashData {
 
 impl PerfectHashData {
     fn new() -> Self {
-        let mut keys = [([0x1; 32], 0); MPH_SIZE];
+        let mut keys = [([0xFF; 32], 0); MPH_SIZE];
         let mut indices = [0; MPH_SIZE];
         for (i, name) in STATION_NAMES.into_iter().enumerate() {
             let prefix = Name::load_masked8(name.as_bytes());
@@ -285,16 +316,19 @@ impl<'a> Records<'a> {
         }
     }
 
-    fn insert(&mut self, name: Name<'a>, temp: i16) {
-        let idx = mph_index(cc_hash(name.masked_8, name.value.len()));
-        let &(ref key, len) = &self.mph_data.keys[idx];
-        let bucket_prefix = neon_load_u8x32(&key[..]);
-        if len > 0 && name.neon_equal(bucket_prefix, len as u32) {
-            self.mph[idx].update(temp);
-            return;
-        }
+    fn use_fast_path(&self, name: &Name<'a>, mph_idx: usize) -> bool {
+        let &(ref key, len) = &self.mph_data.keys[mph_idx];
+        len > 0 && name.neon_equal(key, len as u32)
+    }
+
+    fn insert_fast(&mut self, mph_idx: usize, temp: i16) {
+        self.mph[mph_idx].update(temp);
+    }
+
+    #[inline(never)]
+    fn insert_slow(&mut self, name: &'a [u8], temp: i16) {
         self.fallback
-            .entry(name.value)
+            .entry(name)
             .and_modify(|station| station.update(temp))
             .or_insert(Station::new(temp));
     }
@@ -315,10 +349,62 @@ impl<'a> Records<'a> {
 pub fn process<'a>(buf: &'a [u8], len: usize) -> Stations<'a> {
     let mut records = Records::new();
 
-    for line in LineIter::new(buf, 0, len) {
+    let chunk_len = len / 2;
+    let chunk1_offset = next_line(buf, chunk_len);
+    let mut lines0 = LineIter::new(buf, 0, chunk1_offset);
+    let mut lines1 = LineIter::new(buf, chunk1_offset, len);
+
+    while !(lines0.is_empty() || lines1.is_empty()) {
+        let (name_str0, semi_offset0) = lines0.next_name();
+        let (name_str1, semi_offset1) = lines1.next_name();
+
+        let temp_str0 = lines0.read_temp_str();
+        let temp_str1 = lines1.read_temp_str();
+
+        let temp_len0 = lines0.next_temp_len(semi_offset0);
+        let temp_len1 = lines1.next_temp_len(semi_offset1);
+
+        let temp0 = swar_parse_temp(temp_str0, temp_len0);
+        let temp1 = swar_parse_temp(temp_str1, temp_len1);
+
+        let name0 = Name::new(name_str0);
+        let name1 = Name::new(name_str1);
+
+        let mph_idx0 = name0.mph_idx();
+        let mph_idx1 = name1.mph_idx();
+
+        let use_fast_path0 = records.use_fast_path(&name0, mph_idx0);
+        let use_fast_path1 = records.use_fast_path(&name1, mph_idx1);
+
+        if use_fast_path0 && use_fast_path1 {
+            records.insert_fast(mph_idx0, temp0);
+            records.insert_fast(mph_idx1, temp1);
+        } else {
+            records.insert_slow(name0.value, temp0);
+            records.insert_slow(name1.value, temp1);
+        }
+    }
+
+    for line in lines0 {
         let temp = swar_parse_temp(line.temp, line.temp_len);
         let name = Name::new(line.name);
-        records.insert(name, temp);
+        let mph_idx = name.mph_idx();
+        if records.use_fast_path(&name, mph_idx) {
+            records.insert_fast(mph_idx, temp);
+        } else {
+            records.insert_slow(name.value, temp);
+        }
+    }
+
+    for line in lines1 {
+        let temp = swar_parse_temp(line.temp, line.temp_len);
+        let name = Name::new(line.name);
+        let mph_idx = name.mph_idx();
+        if records.use_fast_path(&name, mph_idx) {
+            records.insert_fast(mph_idx, temp);
+        } else {
+            records.insert_slow(name.value, temp);
+        }
     }
 
     records.finish()
@@ -403,7 +489,7 @@ mod tests {
         let name0 = Name::new(b"abcdefghijk                     ");
         let name1 = Name::new(b"abcdefghijz                     ");
         let name2 = Name::new(b"abcdefghi                       ");
-        let expected = neon_load_u8x32(b"abcdefghijk\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0");
+        let expected = b"abcdefghijk\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0";
         assert!(name0.neon_equal(expected, 11));
         assert!(!name1.neon_equal(expected, 11));
         assert!(!name2.neon_equal(expected, 11));
