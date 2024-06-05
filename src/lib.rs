@@ -14,7 +14,7 @@ use metal::MTLResourceOptions;
 
 /// Pad end of buffer with null bytes to allow us to read 8/16 bytes
 /// at a time for SIMD processing without getting out of bounds
-pub const BUF_EXCESS: usize = 16;
+pub const BUF_EXCESS: usize = 64;
 
 pub const U64_SIZE: u64 = size_of::<u64>() as u64;
 pub const I32_SIZE: u64 = size_of::<i32>() as u64;
