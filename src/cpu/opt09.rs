@@ -1,4 +1,6 @@
 //! Optimizations
+//! 1. Find delimiters using SIMD 64-bytes at a time
+//! 2. Compare bucket keys using SIMD
 
 use std::{
     arch::aarch64::*,
@@ -7,6 +9,8 @@ use std::{
     mem::transmute,
     ops::BitXor,
 };
+
+use seq_macro::seq;
 
 use crate::{Station, Stations, STATION_NAMES};
 
@@ -364,58 +368,36 @@ pub fn process<'a>(buf: &'a [u8], len: usize) -> Stations<'a> {
     let mut lines0 = LineIter::new(buf, 0, chunk1_offset);
     let mut lines1 = LineIter::new(buf, chunk1_offset, len);
 
-    while !(lines0.is_empty() || lines1.is_empty()) {
-        let (name_str0, semi_offset0) = lines0.next_name();
-        let (name_str1, semi_offset1) = lines1.next_name();
+    seq!(I in 0..2 {
+        while !(#(lines~I.is_empty() ||)* false) {
+            #(let (name_str~I, semi_offset~I) = lines~I.next_name();)*
+            #(let name~I = Name::new(name_str~I);)*
+            #(let temp_str~I = lines~I.read_temp_str();)*
+            #(let temp_len~I = lines~I.next_temp_len(semi_offset~I);)*
+            #(let temp~I = swar_parse_temp(temp_str~I, temp_len~I);)*
+            #(let mph_idx~I = name~I.mph_idx();)*
+            #(let use_fast_path~I = records.use_fast_path(&name~I, mph_idx~I);)*
 
-        let temp_str0 = lines0.read_temp_str();
-        let temp_str1 = lines1.read_temp_str();
-
-        let temp_len0 = lines0.next_temp_len(semi_offset0);
-        let temp_len1 = lines1.next_temp_len(semi_offset1);
-
-        let temp0 = swar_parse_temp(temp_str0, temp_len0);
-        let temp1 = swar_parse_temp(temp_str1, temp_len1);
-
-        let name0 = Name::new(name_str0);
-        let name1 = Name::new(name_str1);
-
-        let mph_idx0 = name0.mph_idx();
-        let mph_idx1 = name1.mph_idx();
-
-        let use_fast_path0 = records.use_fast_path(&name0, mph_idx0);
-        let use_fast_path1 = records.use_fast_path(&name1, mph_idx1);
-
-        if use_fast_path0 && use_fast_path1 {
-            records.insert_fast(mph_idx0, temp0);
-            records.insert_fast(mph_idx1, temp1);
-        } else {
-            records.insert_slow(name0.value, temp0);
-            records.insert_slow(name1.value, temp1);
+            if #(use_fast_path~I &&)* true {
+                #(records.insert_fast(mph_idx~I, temp~I);)*
+            } else {
+                #(records.insert_slow(name~I.value, temp~I);)*
+            }
         }
-    }
 
-    for line in lines0 {
-        let temp = swar_parse_temp(line.temp, line.temp_len);
-        let name = Name::new(line.name);
-        let mph_idx = name.mph_idx();
-        if records.use_fast_path(&name, mph_idx) {
-            records.insert_fast(mph_idx, temp);
-        } else {
-            records.insert_slow(name.value, temp);
-        }
-    }
-
-    for line in lines1 {
-        let temp = swar_parse_temp(line.temp, line.temp_len);
-        let name = Name::new(line.name);
-        let mph_idx = name.mph_idx();
-        if records.use_fast_path(&name, mph_idx) {
-            records.insert_fast(mph_idx, temp);
-        } else {
-            records.insert_slow(name.value, temp);
-        }
-    }
+        #(
+            for line in lines~I {
+                let temp = swar_parse_temp(line.temp, line.temp_len);
+                let name = Name::new(line.name);
+                let mph_idx = name.mph_idx();
+                if records.use_fast_path(&name, mph_idx) {
+                    records.insert_fast(mph_idx, temp);
+                } else {
+                    records.insert_slow(name.value, temp);
+                }
+            }
+        )*
+    });
 
     records.finish()
 }
