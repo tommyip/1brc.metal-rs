@@ -35,6 +35,20 @@ fn name_len_stats() {
             break;
         }
     }
+    let hash_u16 = STATION_NAMES
+        .map(|name| {
+            let mut buf = [0u8; 8];
+            let len = name.len().min(8);
+            buf[..len].copy_from_slice(&name.as_bytes()[..len]);
+            let x0 = u32::from_le_bytes(*unsafe { transmute::<&[u8; 8], &[u8; 4]>(&buf) });
+            let x1 = u32::from_le_bytes(*unsafe {
+                transmute::<*const u8, &[u8; 4]>(buf.as_ptr().add(4))
+            });
+            x0 ^ x1 ^ name.len() as u32
+        })
+        .into_iter()
+        .collect::<HashSet<_>>();
+    println!("u32 hash {}/{}", hash_u16.len(), STATION_NAMES.len());
 }
 
 fn min_prefix() {
@@ -178,28 +192,28 @@ fn ptrhash(hash: u64) -> usize {
 }
 
 fn main() {
-    let params = PtrHashParams {
-        alpha: 0.9,
-        c: 1.5,
-        slots_per_part: STATION_NAMES.len() * 2,
-        ..Default::default()
-    };
-    let mphf: PtrHash<&str, ptr_hash::local_ef::LocalEf, CCHasher> =
-        DefaultPtrHash::new(&STATION_NAMES, params);
+    // let params = PtrHashParams {
+    //     alpha: 0.9,
+    //     c: 1.5,
+    //     slots_per_part: STATION_NAMES.len() * 2,
+    //     ..Default::default()
+    // };
+    // let mphf: PtrHash<&str, ptr_hash::local_ef::LocalEf, CCHasher> =
+    //     DefaultPtrHash::new(&STATION_NAMES, params);
 
-    println!("{}", mphf.index(&"Hong Kong"));
-    ptrhash(FxHash::hash(&"Hong Kong", 0));
+    // println!("{}", mphf.index(&"Hong Kong"));
+    // ptrhash(FxHash::hash(&"Hong Kong", 0));
 
-    let mut taken = vec![false; 512];
-    for name in STATION_NAMES {
-        let hash = CCHasher::hash(&name, 0);
-        let ref_idx = ptrhash(hash);
-        // let ref_idx = mphf.index(&name);
-        // let idx = ptrhash(FxHash::hash(&name, 0));
-        // assert_eq!(ref_idx, idx);
-        assert!(!taken[ref_idx]);
-        taken[ref_idx] = true;
-    }
+    // let mut taken = vec![false; 512];
+    // for name in STATION_NAMES {
+    //     let hash = CCHasher::hash(&name, 0);
+    //     let ref_idx = ptrhash(hash);
+    //     // let ref_idx = mphf.index(&name);
+    //     // let idx = ptrhash(FxHash::hash(&name, 0));
+    //     // assert_eq!(ref_idx, idx);
+    //     assert!(!taken[ref_idx]);
+    //     taken[ref_idx] = true;
+    // }
 
     name_len_stats();
 }
