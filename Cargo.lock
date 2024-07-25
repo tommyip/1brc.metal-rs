@@ -736,6 +736,7 @@ dependencies = [
  "memmap2",
  "metal",
  "ptr_hash",
+ "rand",
  "seq-macro",
 ]
 

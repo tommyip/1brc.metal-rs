@@ -9,6 +9,7 @@ edition = "2021"
 memmap2 = "0.9.4"
 metal = "0.27.0"
 ptr_hash = { git = "https://github.com/RagnarGrootKoerkamp/PTRHash", rev = "c9ddc78" }
+rand = "0.8.5"
 seq-macro = "0.3.5"
 
 [dev-dependencies]
