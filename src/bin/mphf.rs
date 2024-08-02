@@ -1,6 +1,7 @@
-#![feature(is_none_or)]
+#![feature(is_none_or, array_chunks)]
 
 use std::{
+    arch::aarch64::*,
     collections::{BinaryHeap, HashSet},
     hash::{DefaultHasher, Hash, Hasher},
     mem::transmute,
@@ -193,6 +194,8 @@ impl PTHash {
     }
 }
 
+/// Simplied PTRHash with u32 keys
+/// Adapted from https://github.com/RagnarGrootKoerkamp/ptrhash
 #[derive(Debug)]
 struct PTRHash {
     p1: u32,
@@ -291,10 +294,6 @@ impl PTRHash {
                         .iter()
                         .any(|bucket_idx| recent.contains(bucket_idx))
                     {
-                        // println!(
-                        //     "in recent {:?}, collide = {:?}, score = {score}",
-                        //     recent, colliding_buckets
-                        // );
                         continue;
                     }
                     if best_score
@@ -353,16 +352,13 @@ impl PTRHash {
     }
 
     fn hash(key: &str) -> u32 {
-        // let mut buf = [0u8; 8];
-        // let len = key.len().min(8);
-        // buf[..len].copy_from_slice(&key.as_bytes()[..len]);
-        // let x0 = u32::from_le_bytes(*unsafe { transmute::<&[u8; 8], &[u8; 4]>(&buf) });
-        // let x1 =
-        //     u32::from_le_bytes(*unsafe { transmute::<*const u8, &[u8; 4]>(buf.as_ptr().add(4)) });
-        // x0 ^ x1 ^ key.len() as u32
-        let mut s = DefaultHasher::new();
-        key.hash(&mut s);
-        (s.finish() % (u32::MAX as u64)) as u32
+        let mut buf = [0u8; 8];
+        let len = key.len().min(8);
+        buf[..len].copy_from_slice(&key.as_bytes()[..len]);
+        let x0 = u32::from_le_bytes(*unsafe { transmute::<&[u8; 8], &[u8; 4]>(&buf) });
+        let x1 =
+            u32::from_le_bytes(*unsafe { transmute::<*const u8, &[u8; 4]>(buf.as_ptr().add(4)) });
+        (x0 ^ x1 ^ key.len() as u32).wrapping_mul(Self::C)
     }
 
     fn bucket(h: u32, p1: u32, c1: u32, c2: u32, c3: i32) -> usize {
@@ -374,10 +370,66 @@ impl PTRHash {
     }
 
     fn slot(h: u32, p: u8, s: u32) -> usize {
+        debug_assert!(h % 2 == 0);
+        debug_assert!(Self::C % 2 == 0);
         (fast_reduce(Self::C, h ^ Self::C.wrapping_mul(p as u32)) & (s - 1)) as usize
+    }
+
+    unsafe fn hash_neon_x4(key_arr: &[&str; 4]) -> uint32x4_t {
+        let len_arr = key_arr.map(|key| key.len() as u32);
+        let lens = vld1q_u32(len_arr.as_ptr());
+        let mask_arr = len_arr.map(|len| ((1i64.checked_shl(len << 3).unwrap_or(0) - 1) as u64));
+        let masks = vld1q_u64_x2(mask_arr.as_ptr());
+        let keys_lo = vld1q_lane_u64::<0>(transmute(key_arr[0].as_ptr()), vdupq_n_u64(0));
+        let keys_lo = vld1q_lane_u64::<1>(transmute(key_arr[1].as_ptr()), keys_lo);
+        let keys_lo = vandq_u64(keys_lo, masks.0);
+        let keys_hi = vld1q_lane_u64::<0>(transmute(key_arr[2].as_ptr()), vdupq_n_u64(0));
+        let keys_hi = vld1q_lane_u64::<1>(transmute(key_arr[3].as_ptr()), keys_hi);
+        let keys_hi = vandq_u64(keys_hi, masks.1);
+        let keys = vuzpq_u32(
+            vreinterpretq_u32_u64(keys_lo),
+            vreinterpretq_u32_u64(keys_hi),
+        );
+        let xor = veor3q_u32(keys.0, keys.1, lens);
+        vmulq_n_u32(xor, PTRHash::C)
+    }
+
+    unsafe fn index_neon_x4(&self, keys: &[&str; 4]) -> [usize; 4] {
+        let hash = Self::hash_neon_x4(keys);
+
+        // Calculate bucket
+        let hash_half = vshrq_n_u32::<1>(hash);
+        let is_large = vcgeq_u32(hash, vdupq_n_u32(self.p1));
+        let large_buckets = vandq_s32(vreinterpretq_s32_u32(is_large), vdupq_n_s32(self.c3));
+        let rem_c = vbslq_u32(is_large, vdupq_n_u32(self.c2), vdupq_n_u32(self.c1));
+        let local_bucket = vqdmulhq_s32(
+            vreinterpretq_s32_u32(hash_half),
+            vreinterpretq_s32_u32(rem_c),
+        );
+        let bucket = vreinterpretq_u32_s32(vaddq_s32(large_buckets, local_bucket));
+
+        // Lookup pilot
+        let pilot_lut = vld1q_u8_x4(self.pilots.as_ptr());
+        let pilot = vreinterpretq_u32_u8(vqtbl4q_u8(pilot_lut, vreinterpretq_u8_u32(bucket)));
+        let pilot = vandq_u32(pilot, vdupq_n_u32(0xFF));
+
+        // Calculate slot
+        let hp = vshrq_n_u32::<1>(vmulq_n_u32(pilot, Self::C));
+        let slot_inner = vreinterpretq_u32_s32(vqdmulhq_n_s32(
+            vreinterpretq_s32_u32(veorq_u32(hash_half, hp)),
+            Self::C as i32,
+        ));
+        let slot = vandq_u32(slot_inner, vdupq_n_u32(self.s - 1));
+
+        let mut out = [0; 4];
+        vst1q_u32(out.as_mut_ptr(), slot);
+
+        out.map(|x| x as usize)
     }
 }
 
+/// Like module (%) but fast
+/// https://lemire.me/blog/2016/06/27/a-fast-alternative-to-the-modulo-reduction/
 fn fast_reduce(h: u32, d: u32) -> u32 {
     ((h as u64 * d as u64) >> 32) as u32
 }
@@ -416,4 +468,48 @@ fn main() {
     let ptrhash = PTRHash::construct(&STATION_NAMES, 0.98, 1.34);
     println!("{:?}", ptrhash);
     verify::<512, _>(|x| ptrhash.index(x));
+}
+
+#[cfg(test)]
+mod tests {
+    use std::arch::aarch64::vst1q_u32;
+
+    use super::*;
+
+    #[test]
+    fn test_ptrhash_hash_neon_x4() {
+        for chunk in STATION_NAMES.array_chunks::<4>() {
+            let actual = unsafe {
+                let actual = PTRHash::hash_neon_x4(chunk);
+                let mut out = [0; 4];
+                vst1q_u32(out.as_mut_ptr(), actual);
+                out
+            };
+            let expected = chunk.map(PTRHash::hash);
+            assert_eq!(actual, expected);
+        }
+    }
+
+    #[test]
+    fn test_ptrhash_index_neon_x4() {
+        let ptrhash = PTRHash {
+            p1: 2576980377,
+            b: 64,
+            s: 512,
+            c1: 31,
+            c2: 108,
+            c3: -44,
+            pilots: vec![
+                95, 219, 20, 180, 128, 176, 28, 128, 105, 245, 169, 122, 225, 13, 124, 163, 38,
+                148, 2, 162, 215, 122, 171, 43, 78, 185, 27, 220, 158, 139, 144, 6, 181, 174, 24,
+                229, 40, 236, 63, 41, 128, 218, 136, 8, 254, 140, 188, 137, 120, 192, 204, 174,
+                121, 17, 64, 198, 123, 108, 245, 249, 212, 78, 113, 221,
+            ],
+        };
+        for chunk in STATION_NAMES.array_chunks::<4>() {
+            let actual = unsafe { ptrhash.index_neon_x4(chunk) };
+            let expected = chunk.map(|key| ptrhash.index(key));
+            assert_eq!(actual, expected);
+        }
+    }
 }

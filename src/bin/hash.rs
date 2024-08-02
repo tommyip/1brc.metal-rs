@@ -4,7 +4,7 @@
 use std::{collections::HashSet, fmt, mem::transmute, ops::BitXor};
 
 use one_billion_row::STATION_NAMES;
-use ptr_hash::{hash::Hasher, DefaultPtrHash, PtrHash, PtrHashParams};
+use ptr_hash::hash::Hasher;
 
 fn name_len_stats() {
     let n_gt_8 = STATION_NAMES.iter().filter(|name| name.len() > 8).count();
