@@ -1,4 +1,4 @@
-#![feature(is_none_or, array_chunks)]
+#![feature(is_none_or, array_chunks, test)]
 
 use std::{
     arch::aarch64::*,
@@ -472,9 +472,30 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
+    extern crate test;
+
     use std::arch::aarch64::vst1q_u32;
 
+    use test::{black_box, Bencher};
+
     use super::*;
+
+    fn default_ptrhash() -> PTRHash {
+        PTRHash {
+            p1: 2576980377,
+            b: 64,
+            s: 512,
+            c1: 31,
+            c2: 108,
+            c3: -44,
+            pilots: vec![
+                95, 219, 20, 180, 128, 176, 28, 128, 105, 245, 169, 122, 225, 13, 124, 163, 38,
+                148, 2, 162, 215, 122, 171, 43, 78, 185, 27, 220, 158, 139, 144, 6, 181, 174, 24,
+                229, 40, 236, 63, 41, 128, 218, 136, 8, 254, 140, 188, 137, 120, 192, 204, 174,
+                121, 17, 64, 198, 123, 108, 245, 249, 212, 78, 113, 221,
+            ],
+        }
+    }
 
     #[test]
     fn test_ptrhash_hash_neon_x4() {
@@ -492,24 +513,31 @@ mod tests {
 
     #[test]
     fn test_ptrhash_index_neon_x4() {
-        let ptrhash = PTRHash {
-            p1: 2576980377,
-            b: 64,
-            s: 512,
-            c1: 31,
-            c2: 108,
-            c3: -44,
-            pilots: vec![
-                95, 219, 20, 180, 128, 176, 28, 128, 105, 245, 169, 122, 225, 13, 124, 163, 38,
-                148, 2, 162, 215, 122, 171, 43, 78, 185, 27, 220, 158, 139, 144, 6, 181, 174, 24,
-                229, 40, 236, 63, 41, 128, 218, 136, 8, 254, 140, 188, 137, 120, 192, 204, 174,
-                121, 17, 64, 198, 123, 108, 245, 249, 212, 78, 113, 221,
-            ],
-        };
+        let ptrhash = default_ptrhash();
         for chunk in STATION_NAMES.array_chunks::<4>() {
             let actual = unsafe { ptrhash.index_neon_x4(chunk) };
             let expected = chunk.map(|key| ptrhash.index(key));
             assert_eq!(actual, expected);
         }
+    }
+
+    #[bench]
+    fn bench_ptrhash_cpu(b: &mut Bencher) {
+        let ptrhash = default_ptrhash();
+        b.iter(|| {
+            for name in STATION_NAMES {
+                black_box(ptrhash.index(name));
+            }
+        });
+    }
+
+    #[bench]
+    fn bench_ptrhash_neon(b: &mut Bencher) {
+        let ptrhash = default_ptrhash();
+        b.iter(|| unsafe {
+            for chunk in STATION_NAMES.array_chunks::<4>() {
+                black_box(ptrhash.index_neon_x4(chunk));
+            }
+        });
     }
 }
